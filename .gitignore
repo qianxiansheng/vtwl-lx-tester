@@ -1,0 +1,89 @@
+# 构建输出
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+Win32/
+Out/
+
+# Visual Studio 文件
+.vs/
+*.sln
+*.suo
+*.user
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.sln.docstates
+
+# 编译中间文件
+*.obj
+*.exe
+*.pdb
+*.ilk
+*.idb
+*.ipdb
+*.iobj
+*.ipch
+*.exp
+*.lib
+*.dll
+*.so
+
+# 预处理输出
+*.i
+*.ii
+
+# 资源文件
+*.res
+*.resources
+
+# 测试相关
+*.coverage
+*.coveragexml
+TestResults/
+
+# 代码分析
+*.pfx
+*.ruleset
+*.codeanalysis
+
+# 临时文件
+*.tmp
+*.temp
+*.log
+*.cache
+*.scc
+*.vssscc
+*.vspscc
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+*.cmake
+!CMakeLists.txt
+Makefile
+
+# 包管理器
+packages/
+vcpkg_installed/
+.vcpkg/
+
+# 文档
+[Dd]ocumentation/
+[Dd]ocs/
+
+# 备份
+*.bak
+*.backup
+*~
+
+# Windows
+Thumbs.db
+desktop.ini
+ehthumbs.db
+*.DS_Store
