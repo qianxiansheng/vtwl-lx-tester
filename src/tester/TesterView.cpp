@@ -19,8 +19,12 @@ constexpr ImU32 kBlue   = IM_COL32(0x33, 0x88, 0xDD, 0xFF);   // 全局「测试
 
 // 工位卡片下半部分的行标签（左列），状态条（右列）统一对齐
 const char* const kItemLabels[kTestItemCount] = { "无线收发包：", "频偏：", "功耗：" };
+const char* const kBoardLabel   = "测试板：";
+const char* const kDutLabel     = "DUT：";
 const char* const kStateLabel   = "工位状态：";
 const char* const kVerdictLabel = "本轮结果：";
+
+const char* const kPortTypeNames[] = { "UART", "USB" };
 
 struct Chip {
 	const char* text;
@@ -38,13 +42,24 @@ Chip ChipOf(GlobalState s)
 	return { "?", kGray };
 }
 
+Chip ChipOf(BoardState s)
+{
+	switch (s) {
+	case BoardState::Disconnected: return { "未连接",   kGray };
+	case BoardState::Connecting:   return { "连接中",   kYellow };
+	case BoardState::Connected:    return { "已连接",   kGreen };
+	case BoardState::Error:        return { "断开/异常", kRed };
+	}
+	return { "?", kGray };
+}
+
 Chip ChipOf(DutState s)
 {
 	switch (s) {
 	case DutState::Disconnected: return { "未连接",   kGray };
-	case DutState::Connecting:   return { "连接中",   kYellow };
+	case DutState::Connecting:   return { "握手中",   kYellow };
 	case DutState::Ready:        return { "DUT就绪",  kGreen };
-	case DutState::Error:        return { "通信异常", kRed };
+	case DutState::Error:        return { "无应答/异常", kRed };
 	}
 	return { "?", kGray };
 }
@@ -153,7 +168,7 @@ bool ConfigRowInt(const char* label, const char* tip, int* v, int lo, int hi)
 	return changed;
 }
 
-bool ConfigRowDouble(const char* label, const char* tip, double* v, double step, double lo, double hi)
+bool ConfigRowDouble(const char* label, const char* tip, double* v, double step, double lo, double hi, const char* format = "%.1f")
 {
 	ImGui::TableNextRow();
 	ImGui::TableNextColumn();
@@ -163,7 +178,7 @@ bool ConfigRowDouble(const char* label, const char* tip, double* v, double step,
 	ImGui::TableNextColumn();
 	ImGui::SetNextItemWidth(-FLT_MIN);
 	ImGui::PushID(label);
-	bool changed = ImGui::InputDouble("##v", v, step, step * 10, "%.1f");
+	bool changed = ImGui::InputDouble("##v", v, step, step * 10, format);
 	ImGui::PopID();
 	if (changed) *v = std::clamp(*v, lo, hi);
 	return changed;
@@ -178,7 +193,7 @@ void ConfigSubHeader(const char* text)
 
 // 一个测试类别的参数组：公共部分 + 专用部分
 template<typename Fn>
-bool ConfigGroup(const char* title, const char* rule, ItemCommonConfig& common, Fn&& specific)
+bool ConfigGroup(const char* title, const char* rule, ItemCommonConfig* common, Fn&& specific)
 {
 	bool changed = false;
 	ImGui::PushID(title);
@@ -192,14 +207,17 @@ bool ConfigGroup(const char* title, const char* rule, ItemCommonConfig& common, 
 		ImGui::TableSetupColumn("label", ImGuiTableColumnFlags_WidthFixed, labelW);
 		ImGui::TableSetupColumn("value", ImGuiTableColumnFlags_WidthStretch);
 
-		ConfigSubHeader("公共部分");
-		changed |= ConfigRowInt("重试次数", "失败后重试的次数，0~5", &common.retryCount, 0, kMaxRetry);
-		ConfigSubHeader("专用部分");
+		if (common) {
+			ConfigSubHeader("公共部分");
+			changed |= ConfigRowInt("重试次数", "仅非紧急停止的 ABORT 重试（FAIL 不重试），0~5；\n重试前先复位 DUT 并重新握手", &common->retryCount, 0, kMaxRetry);
+			changed |= ConfigRowInt("业务超时(ms)", "启动指令发出到拿到结果的总时长，超时判 ABORT", &common->timeoutMs, 100, 600000);
+			ConfigSubHeader("专用部分");
+		}
 		changed |= specific();
 
 		ImGui::EndTable();
 	}
-	ImGui::TextDisabled("判定：%s", rule);
+	if (rule) ImGui::TextDisabled("判定：%s", rule);
 	ImGui::PopID();
 	return changed;
 }
@@ -212,25 +230,33 @@ void DrawStationCard(TesterViewModel& vm, const StationVM& s, float cardW, float
 	const ImGuiStyle& st = ImGui::GetStyle();
 	const float fullW = ImGui::GetContentRegionAvail().x;
 
-	// 标题 + DUT 指示灯
+	// 标题
 	ImGui::SetWindowFontScale(1.25f);
 	ImGui::AlignTextToFramePadding();
 	ImGui::Text("工位#%d", s.no);
 	ImGui::SetWindowFontScale(1.0f);
-	{
-		const Chip c = ChipOf(s.dut);
-		const float w = ImGui::CalcTextSize("通信异常").x + st.FramePadding.x * 2;
-		ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - w);
-		StatusChip(c.text, c.color, ImVec2(w, 0));
-	}
 
-	// 端口选择
+	// 端口类型 + 端口选择
 	ImGui::BeginDisabled(!vm.canEditStation(s));
+	const int typeIdx = static_cast<int>(s.portType);
+	ImGui::SetNextItemWidth(ImGui::CalcTextSize("UART").x + ImGui::GetFrameHeight() + st.FramePadding.x * 2);
+	if (ImGui::BeginCombo("##ptype", kPortTypeNames[typeIdx])) {
+		for (int t = 0; t < 2; ++t) {
+			if (ImGui::Selectable(kPortTypeNames[t], t == typeIdx) && t != typeIdx)
+				vm.setPortType(s.no, static_cast<PortType>(t));
+		}
+		ImGui::EndCombo();
+	}
+	ImGui::SameLine();
 	ImGui::SetNextItemWidth(-FLT_MIN);
 	if (ImGui::BeginCombo("##port", s.port.empty() ? "选择端口" : s.port.c_str())) {
-		if (vm.ports().empty())
+		if (s.portType == PortType::Usb) {
+			ImGui::TextDisabled("USB 端口暂未实现（VID=%04X PID=%04X）", kUsbVid, kUsbPid);
+		}
+		else if (vm.ports().empty()) {
 			ImGui::TextDisabled("未发现端口，请点击「刷新端口」");
-		for (const auto& p : vm.ports()) {
+		}
+		for (const auto& p : s.portType == PortType::Uart ? vm.ports() : std::vector<PortEntry>{}) {
 			char label[256];
 			if (p.description.empty() || p.description == "n/a")
 				snprintf(label, sizeof(label), "%s", p.name.c_str());
@@ -259,7 +285,9 @@ void DrawStationCard(TesterViewModel& vm, const StationVM& s, float cardW, float
 	ImGui::EndDisabled();
 
 	// 下半部分：左列标签 + 右列状态条。用同一个 X 坐标对齐所有状态条
-	float labelW = std::max(ImGui::CalcTextSize(kStateLabel).x, ImGui::CalcTextSize(kVerdictLabel).x);
+	float labelW = 0;
+	for (const char* l : { kBoardLabel, kDutLabel, kStateLabel, kVerdictLabel })
+		labelW = std::max(labelW, ImGui::CalcTextSize(l).x);
 	for (const char* l : kItemLabels)
 		labelW = std::max(labelW, ImGui::CalcTextSize(l).x);
 	const float valueX = ImGui::GetCursorPosX() + labelW + st.ItemSpacing.x;
@@ -274,6 +302,18 @@ void DrawStationCard(TesterViewModel& vm, const StationVM& s, float cardW, float
 		StatusChip(text, color, ImVec2(ImGui::GetContentRegionAvail().x, 0));
 	};
 
+	{
+		const Chip c = ChipOf(s.board);
+		rowLabel(kBoardLabel);
+		rowChip(c.text, c.color);
+		if (!s.boardNote.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", s.boardNote.c_str());
+	}
+	{
+		const Chip c = ChipOf(s.dut);
+		rowLabel(kDutLabel);
+		rowChip(c.text, c.color);
+		if (!s.dutNote.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", s.dutNote.c_str());
+	}
 	{
 		const Chip c = ChipOf(s.state);
 		rowLabel(kStateLabel);
@@ -294,6 +334,8 @@ void DrawStationCard(TesterViewModel& vm, const StationVM& s, float cardW, float
 		char text[96];
 		if (it.valueText.empty())
 			snprintf(text, sizeof(text), "%s", c.text);
+		else if (it.state == ItemState::Running)
+			snprintf(text, sizeof(text), "%s", it.valueText.c_str());   // 执行中：直接显示进度说明
 		else
 			snprintf(text, sizeof(text), "%s  %s", c.text, it.valueText.c_str());
 
@@ -308,6 +350,14 @@ void DrawStationCard(TesterViewModel& vm, const StationVM& s, float cardW, float
 }
 
 } // namespace
+
+float StationCardHeight()
+{
+	// 标题行 + 端口行 + 2 行按钮 + 4 行状态 + 分隔线 + 3 行测试项
+	const ImGuiStyle& st = ImGui::GetStyle();
+	return ImGui::GetFrameHeight() * 1.25f + ImGui::GetFrameHeightWithSpacing() * 10
+		+ st.ItemSpacing.y * 3 + st.WindowPadding.y * 2;
+}
 
 // ---------------------------------------------------------------- 控制台：标题 + 全局状态 + 全局按钮
 
@@ -379,8 +429,7 @@ void DrawStations(TesterViewModel& vm, bool* p_open)
 	ImGui::SetCursorPosY(ImGui::GetCursorPosY() + fh * 0.3f);
 	ImGui::TextDisabled("已添加 %d / %d 个工位", (int)vm.stations().size(), kMaxStations);
 
-	// 卡片：标题行 + 7 行控件 + 分隔线
-	const float cardH = fh * 1.25f + ImGui::GetFrameHeightWithSpacing() * 8 + st.ItemSpacing.y * 3 + st.WindowPadding.y * 2;
+	const float cardH = StationCardHeight();
 	const float areaH = cardH + st.ScrollbarSize + st.ItemSpacing.y;
 
 	ImGui::BeginChild("##stations", ImVec2(0, areaH), false, ImGuiWindowFlags_HorizontalScrollbar);
@@ -415,31 +464,47 @@ void DrawConfig(TesterViewModel& vm, bool* p_open)
 	TestConfig& cfg = vm.configEdit();
 	bool changed = false;
 
-	// 面板足够宽时三组并排，否则纵向排列
+	// 按面板宽度决定每行放几组（4 / 2 / 1）
 	const float groupMinW = ImGui::GetFontSize() * 20;
-	const int cols = ImGui::GetContentRegionAvail().x >= groupMinW * 3 ? 3 : 1;
+	const float availW = ImGui::GetContentRegionAvail().x;
+	const int cols = availW >= groupMinW * 4 ? 4 : availW >= groupMinW * 2 ? 2 : 1;
 	const ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchSame
 		| (cols > 1 ? ImGuiTableFlags_BordersInnerV : ImGuiTableFlags_None);
 
 	if (ImGui::BeginTable("##config", cols, flags)) {
 		ImGui::TableNextColumn();
-		changed |= ConfigGroup("无线收发包测试", "收包率、发包率均 >= 阈值为 PASS", cfg.rfPacket.common, [&] {
+		changed |= ConfigGroup("无线收发包测试", "收包率、发包率、RSSI 均 >= 阈值为 PASS", &cfg.rfPacket.common, [&] {
 			bool c = false;
-			c |= ConfigRowDouble("最低收包率(%)", "收包率 >= 该值为 PASS", &cfg.rfPacket.minRxRatePct, 0.5, 0.0, 100.0);
-			c |= ConfigRowDouble("最低发包率(%)", "发包率 >= 该值为 PASS", &cfg.rfPacket.minTxRatePct, 0.5, 0.0, 100.0);
+			c |= ConfigRowDouble("最低收包率(%)", "DUT 收包率 = 被测板收包数 / 总发包", &cfg.rfPacket.minRxRatePct, 0.5, 0.0, 100.0);
+			c |= ConfigRowDouble("最低发包率(%)", "DUT 发包率 = 测试板收包数 / 总发包", &cfg.rfPacket.minTxRatePct, 0.5, 0.0, 100.0);
+			c |= ConfigRowDouble("最低RSSI(dBm)", "RSSI 均值 >= 该值为 PASS", &cfg.rfPacket.minRssiDbm, 1.0, -127.0, 127.0, "%.0f");
 			return c;
 		});
 		if (cols == 1) ImGui::Spacing();
 
 		ImGui::TableNextColumn();
-		changed |= ConfigGroup("频偏测试", "|实测频偏| <= 阈值为 PASS", cfg.freqOffset.common, [&] {
-			return ConfigRowDouble("最大绝对频偏(KHz)", "|频偏| <= 该值为 PASS", &cfg.freqOffset.maxAbsOffsetKHz, 1.0, 0.0, 1e6);
+		changed |= ConfigGroup("频偏测试", "|实测频偏| <= 阈值为 PASS", &cfg.freqOffset.common, [&] {
+			bool c = false;
+			c |= ConfigRowDouble("最大绝对频偏(KHz)", "|频偏| <= 该值为 PASS", &cfg.freqOffset.maxAbsOffsetKHz, 1.0, 0.0, 1e6);
+			c |= ConfigRowDouble("CFO换算(Hz/LSB)", "频偏(Hz) = CFO 原始 int16 值 x 该系数（待协议确认）", &cfg.freqOffset.cfoHzPerLsb, 0.1, 0.001, 1e6, "%.3f");
+			return c;
 		});
 		if (cols == 1) ImGui::Spacing();
 
 		ImGui::TableNextColumn();
-		changed |= ConfigGroup("功耗测试", "实测功耗 <= 阈值为 PASS", cfg.power.common, [&] {
-			return ConfigRowDouble("最大功耗(uA)", "功耗 <= 该值为 PASS", &cfg.power.maxPowerUA, 1.0, 0.0, 1e9);
+		changed |= ConfigGroup("功耗测试", "平均电流 <= 阈值为 PASS", &cfg.power.common, [&] {
+			return ConfigRowDouble("最大功耗(uA)", "平均电流 <= 该值为 PASS", &cfg.power.maxPowerUA, 1.0, 0.0, 1e9);
+		});
+		if (cols == 1) ImGui::Spacing();
+
+		ImGui::TableNextColumn();
+		changed |= ConfigGroup("通信参数", nullptr, nullptr, [&] {
+			bool c = false;
+			c |= ConfigRowInt("指令超时(ms)", "普通指令应答超时；连续 3 次超时判定测试板断开", &cfg.comm.cmdTimeoutMs, 20, 10000);
+			c |= ConfigRowInt("握手超时(ms)", "REQ_CONN_CHECK_DUT 应答超时（测试板 PING 最长 300ms）", &cfg.comm.connCheckTimeoutMs, 350, 10000);
+			c |= ConfigRowInt("轮询间隔(ms)", "业务执行中查询 GET_TEST_STATUS 的间隔", &cfg.comm.pollIntervalMs, 10, 5000);
+			c |= ConfigRowInt("UART波特率", "下次连接端口时生效", &cfg.comm.baudRate, 1200, 4000000);
+			return c;
 		});
 
 		ImGui::EndTable();
@@ -447,6 +512,60 @@ void DrawConfig(TesterViewModel& vm, bool* p_open)
 
 	// 参数实时生效，无确认弹窗
 	if (changed) vm.commitConfig();
+
+	ImGui::End();
+}
+
+// ---------------------------------------------------------------- 统计
+
+void DrawStats(TesterViewModel& vm, bool* p_open)
+{
+	if (!ImGui::Begin(kStatsWindow, p_open)) {
+		ImGui::End();
+		return;
+	}
+
+	if (ImGui::Button("清零统计")) vm.resetStats();
+	ImGui::SameLine();
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextDisabled("良率 = PASS / (PASS + FAIL)，ABORT 不计入");
+
+	const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchSame;
+	if (ImGui::BeginTable("##stats", 6, flags)) {
+		ImGui::TableSetupColumn("工位");
+		ImGui::TableSetupColumn("测试数");
+		ImGui::TableSetupColumn("PASS");
+		ImGui::TableSetupColumn("FAIL");
+		ImGui::TableSetupColumn("ABORT");
+		ImGui::TableSetupColumn("良率");
+		ImGui::TableHeadersRow();
+
+		const auto& rows = vm.statsRows();
+		for (size_t i = 0; i < rows.size(); ++i) {
+			const StatsRowVM& r = rows[i];
+			const bool total = i + 1 == rows.size();
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::TextUnformatted(r.label.c_str());
+			ImGui::TableNextColumn(); ImGui::Text("%d", r.tested);
+			ImGui::TableNextColumn(); ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(kGreen), "%d", r.pass);
+			ImGui::TableNextColumn(); ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(kRed), "%d", r.fail);
+			ImGui::TableNextColumn(); ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(kOrange), "%d", r.abort);
+			ImGui::TableNextColumn(); ImGui::TextUnformatted(r.yieldText.c_str());
+			if (total) ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, IM_COL32(0, 0, 0, 0x18));
+		}
+		ImGui::EndTable();
+	}
+
+	ImGui::Spacing();
+	ImGui::TextDisabled("结果文件：");
+	ImGui::SameLine();
+	ImGui::TextWrapped("%s", vm.resultFile().empty() ? "--" : vm.resultFile().c_str());
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("右键复制路径");
+	if (ImGui::BeginPopupContextItem("##csvpath")) {
+		if (ImGui::MenuItem("复制路径")) ImGui::SetClipboardText(vm.resultFile().c_str());
+		ImGui::EndPopup();
+	}
 
 	ImGui::End();
 }

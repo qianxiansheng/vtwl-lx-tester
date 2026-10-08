@@ -34,13 +34,14 @@ const json& child(const json& j, const char* key)
 
 json toJson(const ItemCommonConfig& c)
 {
-	return { { "retryCount", c.retryCount } };
+	return { { "retryCount", c.retryCount }, { "timeoutMs", c.timeoutMs } };
 }
 
 ItemCommonConfig commonFromJson(const json& j, const ItemCommonConfig& def)
 {
 	ItemCommonConfig c;
 	c.retryCount = get<int>(j, "retryCount", def.retryCount);
+	c.timeoutMs = get<int>(j, "timeoutMs", def.timeoutMs);
 	return c;
 }
 
@@ -49,7 +50,7 @@ json toJson(const PersistentConfig& cfg)
 	const TestConfig& t = cfg.tests;
 	json stations = json::array();
 	for (const auto& s : cfg.stations)
-		stations.push_back({ { "no", s.no }, { "port", s.port } });
+		stations.push_back({ { "no", s.no }, { "portType", s.portType == PortType::Usb ? "usb" : "uart" }, { "port", s.port } });
 
 	return {
 		{ "version", kFormatVersion },
@@ -58,15 +59,23 @@ json toJson(const PersistentConfig& cfg)
 				{ "common", toJson(t.rfPacket.common) },
 				{ "minRxRatePct", t.rfPacket.minRxRatePct },
 				{ "minTxRatePct", t.rfPacket.minTxRatePct },
+				{ "minRssiDbm", t.rfPacket.minRssiDbm },
 			} },
 			{ "freqOffset", {
 				{ "common", toJson(t.freqOffset.common) },
 				{ "maxAbsOffsetKHz", t.freqOffset.maxAbsOffsetKHz },
+				{ "cfoHzPerLsb", t.freqOffset.cfoHzPerLsb },
 			} },
 			{ "power", {
 				{ "common", toJson(t.power.common) },
 				{ "maxPowerUA", t.power.maxPowerUA },
 			} },
+		} },
+		{ "comm", {
+			{ "cmdTimeoutMs", t.comm.cmdTimeoutMs },
+			{ "connCheckTimeoutMs", t.comm.connCheckTimeoutMs },
+			{ "pollIntervalMs", t.comm.pollIntervalMs },
+			{ "baudRate", t.comm.baudRate },
 		} },
 		{ "stations", stations },
 	};
@@ -84,14 +93,22 @@ PersistentConfig fromJson(const json& root)
 	t.rfPacket.common = commonFromJson(child(rf, "common"), def.rfPacket.common);
 	t.rfPacket.minRxRatePct = get<double>(rf, "minRxRatePct", def.rfPacket.minRxRatePct);
 	t.rfPacket.minTxRatePct = get<double>(rf, "minTxRatePct", def.rfPacket.minTxRatePct);
+	t.rfPacket.minRssiDbm = get<double>(rf, "minRssiDbm", def.rfPacket.minRssiDbm);
 
 	const json& fo = child(tests, "freqOffset");
 	t.freqOffset.common = commonFromJson(child(fo, "common"), def.freqOffset.common);
 	t.freqOffset.maxAbsOffsetKHz = get<double>(fo, "maxAbsOffsetKHz", def.freqOffset.maxAbsOffsetKHz);
+	t.freqOffset.cfoHzPerLsb = get<double>(fo, "cfoHzPerLsb", def.freqOffset.cfoHzPerLsb);
 
 	const json& pw = child(tests, "power");
 	t.power.common = commonFromJson(child(pw, "common"), def.power.common);
 	t.power.maxPowerUA = get<double>(pw, "maxPowerUA", def.power.maxPowerUA);
+
+	const json& cm = child(root, "comm");
+	t.comm.cmdTimeoutMs = get<int>(cm, "cmdTimeoutMs", def.comm.cmdTimeoutMs);
+	t.comm.connCheckTimeoutMs = get<int>(cm, "connCheckTimeoutMs", def.comm.connCheckTimeoutMs);
+	t.comm.pollIntervalMs = get<int>(cm, "pollIntervalMs", def.comm.pollIntervalMs);
+	t.comm.baudRate = get<int>(cm, "baudRate", def.comm.baudRate);
 
 	sanitize(t);
 
@@ -101,6 +118,7 @@ PersistentConfig fromJson(const json& root)
 			if (!s.is_object()) continue;
 			StationSetting st;
 			st.no = get<int>(s, "no", 0);
+			st.portType = get<std::string>(s, "portType", "uart") == "usb" ? PortType::Usb : PortType::Uart;
 			st.port = get<std::string>(s, "port", "");
 			if (st.no >= 1 && st.no <= kMaxStations)
 				cfg.stations.push_back(std::move(st));
@@ -112,6 +130,7 @@ PersistentConfig fromJson(const json& root)
 void sanitizeCommon(ItemCommonConfig& c)
 {
 	c.retryCount = std::clamp(c.retryCount, 0, kMaxRetry);
+	c.timeoutMs = std::clamp(c.timeoutMs, 100, 600000);
 }
 
 } // namespace
@@ -125,6 +144,12 @@ void sanitize(TestConfig& cfg)
 	cfg.rfPacket.minTxRatePct = std::clamp(cfg.rfPacket.minTxRatePct, 0.0, 100.0);
 	cfg.freqOffset.maxAbsOffsetKHz = std::max(cfg.freqOffset.maxAbsOffsetKHz, 0.0);
 	cfg.power.maxPowerUA = std::max(cfg.power.maxPowerUA, 0.0);
+	cfg.rfPacket.minRssiDbm = std::clamp(cfg.rfPacket.minRssiDbm, -127.0, 127.0);
+	if (!(cfg.freqOffset.cfoHzPerLsb > 0.0)) cfg.freqOffset.cfoHzPerLsb = 1.0;
+	cfg.comm.cmdTimeoutMs = std::clamp(cfg.comm.cmdTimeoutMs, 20, 10000);
+	cfg.comm.connCheckTimeoutMs = std::clamp(cfg.comm.connCheckTimeoutMs, 350, 10000);
+	cfg.comm.pollIntervalMs = std::clamp(cfg.comm.pollIntervalMs, 10, 5000);
+	cfg.comm.baudRate = std::clamp(cfg.comm.baudRate, 1200, 4000000);
 }
 
 LoadResult load(const std::filesystem::path& path, PersistentConfig& out, std::string& err)

@@ -17,11 +17,21 @@ struct ItemVM {
 
 struct StationVM {
 	int          no = 0;
+	PortType     portType = PortType::Uart;
 	std::string  port;
+	BoardState   board = BoardState::Disconnected;
 	DutState     dut = DutState::Disconnected;
+	std::string  boardNote;
+	std::string  dutNote;
 	StationState state = StationState::Preparing;
 	Verdict      verdict = Verdict::None;
 	std::array<ItemVM, kTestItemCount> items{};
+};
+
+struct StatsRowVM {
+	std::string label;                  // "工位#1" / "合计"
+	int tested = 0, pass = 0, fail = 0, abort = 0;
+	std::string yieldText;              // 良率 = PASS / (PASS + FAIL)，ABORT 不计入
 };
 
 struct LogLineVM {
@@ -44,6 +54,8 @@ public:
 	const std::vector<StationVM>& stations() const { return m_stations; }
 	const std::vector<PortEntry>& ports() const { return m_ports; }
 	const std::vector<LogLineVM>& logs() const { return m_logs; }
+	const std::vector<StatsRowVM>& statsRows() const { return m_statsRows; }   // 最后一行为合计
+	const std::string&            resultFile() const { return m_resultFile; }
 
 	// 日志选择（按行，seq 区间）。选择属于界面状态，放在 VM 而不是 View 的静态变量里
 	void        selectLog(uint64_t seq, bool extend);   // extend: shift 点击/拖拽，扩展到 seq
@@ -73,7 +85,9 @@ public:
 	// ---- 命令
 	void addStation();
 	void removeStation(int no);
+	void setPortType(int no, PortType type);
 	void selectPort(int no, const std::string& port);
+	void resetStats();
 	void connect(int no);
 	void disconnect(int no);
 	void refreshPorts();
@@ -98,6 +112,8 @@ private:
 	std::vector<PortEntry> m_ports;
 	TestConfig             m_config;
 	std::vector<LogLineVM> m_logs;
+	std::vector<StatsRowVM> m_statsRows;
+	std::string            m_resultFile;
 	uint64_t               m_lastLogSeq = 0;
 	uint64_t               m_selAnchor = 0;     // 0 = 无选择
 	uint64_t               m_selEnd = 0;

@@ -106,6 +106,22 @@ bool TesterModel::setStationPort(int no, const std::string& port)
 	return true;
 }
 
+bool TesterModel::setStationPortType(int no, PortType type)
+{
+	{
+		std::lock_guard<std::mutex> lk(m_mutex);
+		auto it = std::find_if(m_stations.begin(), m_stations.end(),
+			[no](const StationInfo& s) { return s.no == no; });
+		if (it == m_stations.end()) return false;
+		if (it->portType == type) return true;
+		it->portType = type;
+		it->port.clear();
+		++m_persistRevision;
+	}
+	markDirty(Dirty_Stations);
+	return true;
+}
+
 bool TesterModel::updateStation(int no, const std::function<void(StationInfo&)>& fn)
 {
 	{
@@ -178,7 +194,7 @@ PersistentConfig TesterModel::persistentConfig(uint64_t* revision) const
 	PersistentConfig cfg;
 	cfg.tests = m_config;
 	for (const auto& s : m_stations)
-		cfg.stations.push_back({ s.no, s.port });
+		cfg.stations.push_back({ s.no, s.portType, s.port });
 	if (revision) *revision = m_persistRevision;
 	return cfg;
 }
@@ -197,6 +213,7 @@ void TesterModel::restorePersistentConfig(const PersistentConfig& cfg)
 			if (dup) continue;
 			StationInfo info;
 			info.no = st.no;
+			info.portType = st.portType;
 			info.port = st.port;
 			m_stations.push_back(std::move(info));
 		}
@@ -205,6 +222,50 @@ void TesterModel::restorePersistentConfig(const PersistentConfig& cfg)
 		++m_persistRevision;
 	}
 	markDirty(Dirty_Config | Dirty_Stations);
+}
+
+StatsSnapshot TesterModel::stats() const
+{
+	std::lock_guard<std::mutex> lk(m_mutex);
+	return { m_stats, m_resultFile };
+}
+
+void TesterModel::recordVerdict(int no, Verdict v)
+{
+	{
+		std::lock_guard<std::mutex> lk(m_mutex);
+		auto it = std::find_if(m_stats.begin(), m_stats.end(), [no](const StationStats& s) { return s.no == no; });
+		if (it == m_stats.end()) {
+			StationStats st;
+			st.no = no;
+			it = m_stats.insert(std::find_if(m_stats.begin(), m_stats.end(),
+				[no](const StationStats& s) { return s.no > no; }), st);
+		}
+		++it->tested;
+		if (v == Verdict::Pass) ++it->pass;
+		else if (v == Verdict::Fail) ++it->fail;
+		else if (v == Verdict::Abort) ++it->abort;
+	}
+	markDirty(Dirty_Stats);
+}
+
+void TesterModel::resetStats()
+{
+	{
+		std::lock_guard<std::mutex> lk(m_mutex);
+		m_stats.clear();
+	}
+	markDirty(Dirty_Stats);
+}
+
+void TesterModel::setResultFile(const std::string& path)
+{
+	{
+		std::lock_guard<std::mutex> lk(m_mutex);
+		if (m_resultFile == path) return;
+		m_resultFile = path;
+	}
+	markDirty(Dirty_Stats);
 }
 
 uint64_t TesterModel::pushAlert(AlertEvent ev)

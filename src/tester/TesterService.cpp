@@ -2,12 +2,25 @@
 #include <algorithm>
 #include "serial/serial.h"
 #include "TesterConfigStore.h"
+#include "link/SimBoard.h"
+#include "link/Transport.h"
 
 namespace Lx::Tester {
 
 static std::string stationTag(int no)
 {
 	return "工位#" + std::to_string(no);
+}
+
+static const char* globalText(GlobalState s)
+{
+	switch (s) {
+	case GlobalState::Preparing: return "准备中";
+	case GlobalState::Ready:     return "准备就绪";
+	case GlobalState::Testing:   return "测试进行中";
+	case GlobalState::Finished:  return "测试结束";
+	}
+	return "?";
 }
 
 TesterService::TesterService(std::shared_ptr<TesterModel> model, std::filesystem::path configPath)
@@ -32,40 +45,51 @@ void TesterService::stop()
 	if (m_thread.joinable()) m_thread.join();
 }
 
+// ---------------------------------------------------------------- 事件循环
+
 void TesterService::post(Task t)
 {
 	{
 		std::lock_guard<std::mutex> lk(m_queueMutex);
 		if (!m_running) return;
-		m_tasks.push(std::move(t));
+		m_tasks.push_back(std::move(t));
 	}
 	m_queueCv.notify_one();
+}
+
+Link::IEventLoop::TimerId TesterService::after(uint32_t ms, Task t)
+{
+	const TimerId id = ++m_timerSeq;
+	m_timers.emplace(id, std::move(t));
+	m_timerQueue.emplace(Clock::now() + std::chrono::milliseconds(ms), id);
+	return id;
+}
+
+void TesterService::cancel(TimerId id)
+{
+	if (id) m_timers.erase(id);   // 队列里的条目到期时被跳过
+}
+
+void TesterService::runDueTimers()
+{
+	const auto now = Clock::now();
+	while (!m_timerQueue.empty() && m_timerQueue.begin()->first <= now) {
+		const TimerId id = m_timerQueue.begin()->second;
+		m_timerQueue.erase(m_timerQueue.begin());
+		auto it = m_timers.find(id);
+		if (it == m_timers.end()) continue;
+		Task fn = std::move(it->second);
+		m_timers.erase(it);
+		fn();
+	}
 }
 
 void TesterService::threadLoop()
 {
 	loadConfig();
 
-	using clock = std::chrono::steady_clock;
-	auto nextSave = clock::now() + kSaveInterval;
-
-	for (;;) {
-		Task t;
-		{
-			std::unique_lock<std::mutex> lk(m_queueMutex);
-			m_queueCv.wait_until(lk, nextSave, [this] { return !m_tasks.empty() || !m_running; });
-			// 退出时先把队列里剩余的命令（例如最后一次参数修改）执行完
-			if (!m_running && m_tasks.empty()) break;
-			if (m_tasks.empty()) {
-				// 超时：周期性保存
-				lk.unlock();
-				saveConfigIfChanged();
-				nextSave = clock::now() + kSaveInterval;
-				continue;
-			}
-			t = std::move(m_tasks.front());
-			m_tasks.pop();
-		}
+	auto nextSave = Clock::now() + kSaveInterval;
+	auto runSafely = [this](const Task& t) {
 		try {
 			t();
 		}
@@ -73,15 +97,43 @@ void TesterService::threadLoop()
 			log(LogLevel::Error, std::string("业务线程异常：") + e.what());
 			notify(AlertLevel::Error, "业务异常", e.what());
 		}
-		if (clock::now() >= nextSave) {
+	};
+
+	for (;;) {
+		runSafely([this] { runDueTimers(); });
+
+		// 丢掉已取消的队首定时器，算出下一次唤醒时间
+		while (!m_timerQueue.empty() && !m_timers.count(m_timerQueue.begin()->second))
+			m_timerQueue.erase(m_timerQueue.begin());
+		auto wake = nextSave;
+		if (!m_timerQueue.empty()) wake = std::min(wake, m_timerQueue.begin()->first);
+
+		std::deque<Task> batch;
+		{
+			std::unique_lock<std::mutex> lk(m_queueMutex);
+			m_queueCv.wait_until(lk, wake, [this] { return !m_tasks.empty() || !m_running; });
+			// 退出时先把队列里剩余的命令（例如最后一次参数修改）执行完
+			if (!m_running && m_tasks.empty()) break;
+			batch.swap(m_tasks);
+		}
+		for (auto& t : batch) runSafely(t);
+
+		if (Clock::now() >= nextSave) {
 			saveConfigIfChanged();
-			nextSave = clock::now() + kSaveInterval;
+			nextSave = Clock::now() + kSaveInterval;
 		}
 	}
 
-	// 退出前保存最后一次修改
+	// 关闭所有链路（会等待各 IO 线程退出），再保存最后一次修改
+	m_rfQueue.clear();
+	m_rfHolder = 0;
+	m_controllers.clear();
+	m_timers.clear();
+	m_timerQueue.clear();
 	saveConfigIfChanged();
 }
+
+// ---------------------------------------------------------------- 持久化
 
 void TesterService::loadConfig()
 {
@@ -106,6 +158,10 @@ void TesterService::loadConfig()
 	}
 	// 加载结果视为“已保存”状态，不需要立即回写
 	m_model->persistentConfig(&m_savedRevision);
+
+	for (const auto& s : m_model->stations())
+		createController(s.no);
+	m_model->setResultFile(m_csv.currentFile());
 }
 
 void TesterService::saveConfigIfChanged()
@@ -126,6 +182,8 @@ void TesterService::saveConfigIfChanged()
 		}
 	}
 }
+
+// ---------------------------------------------------------------- 日志 / 弹窗
 
 void TesterService::log(LogLevel level, std::string text)
 {
@@ -155,6 +213,17 @@ void TesterService::confirm(AlertLevel level, std::string title, std::string mes
 
 // ---------------------------------------------------------------- 工位管理
 
+void TesterService::createController(int no)
+{
+	m_controllers[no] = std::make_shared<StationController>(static_cast<IStationHost&>(*this), no);
+}
+
+StationController* TesterService::controller(int no)
+{
+	auto it = m_controllers.find(no);
+	return it == m_controllers.end() ? nullptr : it->second.get();
+}
+
 void TesterService::addStation()
 {
 	post([this] {
@@ -167,18 +236,26 @@ void TesterService::addStation()
 			notify(AlertLevel::Warning, "无法添加工位", "工位数量已达上限（6 个）。");
 			return;
 		}
+		createController(no);
 		log(LogLevel::Info, stationTag(no) + " 已添加");
-		// TODO: 新增未就绪工位后，全局状态应回到「准备中」
+		recomputeGlobal();
 	});
 }
 
 void TesterService::removeStation(int no)
 {
 	post([this, no] {
-		// TODO: 若端口已连接，先断开再移除
+		if (auto* c = controller(no); c && c->isTesting()) return;
+		m_controllers.erase(no);   // 析构时关闭链路
 		if (m_model->removeStation(no))
 			log(LogLevel::Info, stationTag(no) + " 已移除");
+		recomputeGlobal();
 	});
+}
+
+void TesterService::setPortType(int no, PortType type)
+{
+	post([this, no, type] { m_model->setStationPortType(no, type); });
 }
 
 void TesterService::selectPort(int no, const std::string& port)
@@ -199,17 +276,14 @@ void TesterService::selectPort(int no, const std::string& port)
 void TesterService::connectStation(int no)
 {
 	post([this, no] {
-		// TODO: 打开端口 -> DUT 状态 Connecting -> 握手成功 Ready / 失败 Error，
-		//       全部工位 Ready 后全局状态切换为「准备就绪」
-		log(LogLevel::Warn, stationTag(no) + " 连接端口：功能未实现");
+		if (auto* c = controller(no)) c->connect();
 	});
 }
 
 void TesterService::disconnectStation(int no)
 {
 	post([this, no] {
-		// TODO: 关闭端口 -> DUT 状态 Disconnected，全局状态回到「准备中」
-		log(LogLevel::Warn, stationTag(no) + " 断开端口：功能未实现");
+		if (auto* c = controller(no)) c->disconnect();
 	});
 }
 
@@ -217,38 +291,138 @@ void TesterService::refreshPorts()
 {
 	post([this] {
 		std::vector<PortEntry> ports;
-		for (const auto& p : serial::list_ports())
-			ports.push_back({ p.port, p.description });
-		// TODO: 枚举 WinUSB 设备
+		try {
+			for (const auto& p : serial::list_ports())
+				ports.push_back({ p.port, p.description });
+		}
+		catch (const std::exception& e) {
+			log(LogLevel::Warn, std::string("枚举串口失败：") + e.what());
+		}
 		std::sort(ports.begin(), ports.end(),
 			[](const PortEntry& a, const PortEntry& b) { return a.name < b.name; });
+		if (Link::SimSettings::get().portsEnabled) {
+			for (int i = 1; i <= kMaxStations; ++i)
+				ports.push_back({ std::string(Link::kSimPortPrefix) + std::to_string(i), "模拟测试板" });
+		}
 		m_model->setAvailablePorts(std::move(ports));
 	});
 }
 
 // ---------------------------------------------------------------- 全局流程
 
+void TesterService::setGlobal(GlobalState s)
+{
+	if (m_model->globalState() == s) return;
+	m_model->setGlobalState(s);
+	log(LogLevel::Info, std::string("全局状态切换为：") + globalText(s));
+}
+
+void TesterService::recomputeGlobal()
+{
+	const GlobalState g = m_model->globalState();
+	if (g == GlobalState::Testing) {
+		const bool anyTesting = std::any_of(m_controllers.begin(), m_controllers.end(),
+			[](const auto& kv) { return kv.second->isTesting(); });
+		if (!anyTesting) setGlobal(GlobalState::Finished);
+		return;
+	}
+	if (g == GlobalState::Finished) return;   // 等待“下一轮”
+
+	const bool ready = !m_controllers.empty() && std::all_of(m_controllers.begin(), m_controllers.end(),
+		[](const auto& kv) { return kv.second->isBoardConnected() && kv.second->isDutReady() && !kv.second->isTesting(); });
+	setGlobal(ready ? GlobalState::Ready : GlobalState::Preparing);
+}
+
+void TesterService::onStationChanged(int)
+{
+	recomputeGlobal();
+}
+
 void TesterService::startTest()
 {
 	post([this] {
-		// TODO: 校验全局状态=准备就绪 -> 测试进行中；RF 全局互斥调度，功耗并行
-		log(LogLevel::Warn, "开始测试：功能未实现");
+		recomputeGlobal();
+		if (m_model->globalState() != GlobalState::Ready) {
+			notify(AlertLevel::Warning, "无法开始测试", "全局状态不是「准备就绪」：请确认所有工位的测试板和 DUT 均已连接就绪。");
+			return;
+		}
+		setGlobal(GlobalState::Testing);
+		m_rfQueue.clear();
+		m_rfHolder = 0;
+		for (auto& [no, c] : m_controllers) c->startRound();   // 按工位编号顺序排队 RF 资源
 	});
 }
 
 void TesterService::nextRound()
 {
 	post([this] {
-		// TODO: 校验全局状态=测试结束 -> 清空本轮结果、复位工位状态 -> 准备中
-		log(LogLevel::Warn, "下一轮：功能未实现");
+		if (m_model->globalState() != GlobalState::Finished) return;
+		setGlobal(GlobalState::Preparing);
+		for (auto& [no, c] : m_controllers) c->prepareNextRound();
+		recomputeGlobal();
 	});
 }
 
 void TesterService::emergencyStop()
 {
 	post([this] {
-		// TODO: 通知所有测试板终止业务、释放 RF 锁、全局回到准备中
-		log(LogLevel::Error, "紧急停止：功能未实现");
+		log(LogLevel::Error, "紧急停止：通知所有测试板终止业务，释放 RF 资源");
+		m_rfQueue.clear();
+		m_rfHolder = 0;
+		// 先切到准备中，避免各工位结束时被判定为“测试结束”
+		setGlobal(GlobalState::Preparing);
+		for (auto& [no, c] : m_controllers) c->emergencyStop();
+		m_rfQueue.clear();
+		m_rfHolder = 0;
+		recomputeGlobal();
+	});
+}
+
+// ---------------------------------------------------------------- RF 互斥资源
+
+void TesterService::acquireRf(int no, std::function<void()> granted)
+{
+	if (m_rfHolder == 0 || m_rfHolder == no) {
+		m_rfHolder = no;
+		post(std::move(granted));   // 异步回调，避免在调用方栈内重入
+		return;
+	}
+	m_rfQueue.emplace_back(no, std::move(granted));
+	log(LogLevel::Info, stationTag(no) + " 等待 RF 资源（当前占用：" + stationTag(m_rfHolder) + "）");
+}
+
+void TesterService::releaseRf(int no)
+{
+	m_rfQueue.erase(std::remove_if(m_rfQueue.begin(), m_rfQueue.end(),
+		[no](const auto& e) { return e.first == no; }), m_rfQueue.end());
+	if (m_rfHolder != no) return;
+	m_rfHolder = 0;
+	if (!m_rfQueue.empty()) {
+		auto next = std::move(m_rfQueue.front());
+		m_rfQueue.pop_front();
+		m_rfHolder = next.first;
+		post(std::move(next.second));
+	}
+}
+
+// ---------------------------------------------------------------- 结果
+
+void TesterService::onRoundFinished(const RoundRecord& rec)
+{
+	m_model->recordVerdict(rec.no, rec.verdict);
+	std::string err;
+	if (!m_csv.append(rec, err)) {
+		log(LogLevel::Error, "写入结果文件失败：" + err);
+		notify(AlertLevel::Error, "结果保存失败", "写入结果文件失败：" + err + "\n" + m_csv.currentFile());
+	}
+	m_model->setResultFile(m_csv.currentFile());
+}
+
+void TesterService::resetStats()
+{
+	post([this] {
+		m_model->resetStats();
+		log(LogLevel::Info, "统计已清零");
 	});
 }
 
@@ -287,66 +461,13 @@ void TesterService::debugRaiseAlert(AlertKind kind)
 {
 	post([this, kind] {
 		if (kind == AlertKind::Notify) {
-			log(LogLevel::Error, "工位#3 测试返回ABORT：通信超时（模拟）");
-			notify(AlertLevel::Error, "工位#3 通信异常", "测试板通信超时，测试项已 ABORT。\n（业务线程模拟事件）");
+			notify(AlertLevel::Error, "模拟通知", "这是一条由业务线程发出的通知弹窗。");
 			return;
 		}
-		confirm(AlertLevel::Warning, "DUT 断开",
-			"工位#2 DUT 连接断开，是否重新连接？\n（业务线程模拟事件）",
+		confirm(AlertLevel::Warning, "模拟确认", "这是一条由业务线程发出的确认弹窗，结果会回传业务线程。",
 			[this](bool accepted) {
-				log(LogLevel::Info, std::string("用户选择：") + (accepted ? "重新连接" : "取消"));
+				log(LogLevel::Info, std::string("用户选择：") + (accepted ? "确定" : "取消"));
 			});
-	});
-}
-
-void TesterService::debugFillDemoData()
-{
-	post([this] {
-		while (m_model->stations().size() < 4 && m_model->addStation() != 0) {}
-
-		auto ports = m_model->availablePorts();
-		int i = 0;
-		m_model->updateAllStations([&](StationInfo& s) {
-			s.port = i < (int)ports.size() ? ports[i].name : "COM" + std::to_string(10 + i);
-			auto& it = s.items;
-			switch (i % 4) {
-			case 0:
-				s.dut = DutState::Ready; s.state = StationState::Finished; s.lastVerdict = Verdict::Pass;
-				it[0] = { ItemState::Pass, 2, { 97.2, 98.5 } };
-				it[1] = { ItemState::Pass, 1, { -12.5 } };
-				it[2] = { ItemState::Pass, 1, { 85.0 } };
-				break;
-			case 1:
-				s.dut = DutState::Ready; s.state = StationState::Testing; s.lastVerdict = Verdict::None;
-				it[0] = { ItemState::Pass, 2, { 99.0, 96.4 } };
-				it[1] = { ItemState::Running };
-				it[2] = { ItemState::Pending };
-				break;
-			case 2:
-				s.dut = DutState::Error; s.state = StationState::Finished; s.lastVerdict = Verdict::Abort;
-				it[0] = { ItemState::Abort };
-				it[1] = { ItemState::Pending };
-				it[2] = { ItemState::Pending };
-				break;
-			default:
-				s.dut = DutState::Connecting; s.state = StationState::Finished; s.lastVerdict = Verdict::Fail;
-				it[0] = { ItemState::Fail, 2, { 96.1, 91.3 } };
-				it[1] = { ItemState::Fail, 1, { 63.8 } };
-				it[2] = { ItemState::Running };
-				break;
-			}
-			++i;
-		});
-		m_model->setGlobalState(GlobalState::Testing);
-		log(LogLevel::Info, "已填充演示数据");
-	});
-}
-
-void TesterService::debugCycleGlobalState()
-{
-	post([this] {
-		auto s = static_cast<GlobalState>((static_cast<int>(m_model->globalState()) + 1) % 4);
-		m_model->setGlobalState(s);
 	});
 }
 

@@ -3,36 +3,55 @@
   "tests": {
     "rfPacket": {
       "common": {
-        "retryCount": 1
+        "retryCount": 1,
+        "timeoutMs": 10000
       },
       "minRxRatePct": 94.0,
-      "minTxRatePct": 95.0
+      "minTxRatePct": 95.0,
+      "minRssiDbm": -70.0
     },
     "freqOffset": {
       "common": {
-        "retryCount": 2
+        "retryCount": 2,
+        "timeoutMs": 5000
       },
-      "maxAbsOffsetKHz": 50.0
+      "maxAbsOffsetKHz": 50.0,
+      "cfoHzPerLsb": 1.0
     },
     "power": {
       "common": {
-        "retryCount": 0
+        "retryCount": 0,
+        "timeoutMs": 10000
       },
       "maxPowerUA": 100.0
     }
   },
+  "comm": {
+    "cmdTimeoutMs": 200,
+    "connCheckTimeoutMs": 600,
+    "pollIntervalMs": 100,
+    "baudRate": 115200
+  },
   "stations": [
     {
       "no": 1,
-      "port": ""
+      "portType": "uart",
+      "port": "SIM1"
     },
     {
       "no": 2,
-      "port": ""
+      "portType": "uart",
+      "port": "SIM2"
     },
     {
       "no": 3,
-      "port": ""
+      "portType": "uart",
+      "port": "SIM3"
+    },
+    {
+      "no": 4,
+      "portType": "uart",
+      "port": "SIM4"
     }
   ]
 }

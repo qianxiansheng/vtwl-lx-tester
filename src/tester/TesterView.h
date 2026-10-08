@@ -10,11 +10,16 @@ inline constexpr const char* kConsoleWindow  = "控制台###tester_console";
 inline constexpr const char* kStationsWindow = "工位管理###tester_stations";
 inline constexpr const char* kConfigWindow   = "测试参数###tester_config";
 inline constexpr const char* kLogWindow      = "日志###tester_log";
+inline constexpr const char* kStatsWindow    = "统计###tester_stats";
+
+// 工位卡片高度（默认 dock 布局按它分配「工位管理」面板高度）
+float StationCardHeight();
 
 void DrawConsole(TesterViewModel& vm, bool* p_open);   // 标题 + 全局状态 + 全局操作按钮
 void DrawStations(TesterViewModel& vm, bool* p_open);  // 端口 / 工位管理
 void DrawConfig(TesterViewModel& vm, bool* p_open);    // 测试参数配置
 void DrawLog(TesterViewModel& vm, bool* p_open);       // 日志（可选择、复制）
+void DrawStats(TesterViewModel& vm, bool* p_open);     // 统计 + 结果文件路径
 
 // 绘制队首的业务弹窗（非模态浮动窗口，停在日志面板上方，保证紧急停止始终可点）
 void DrawAlert(TesterViewModel& vm);

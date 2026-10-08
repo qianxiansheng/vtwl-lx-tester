@@ -22,7 +22,8 @@ public:
 		Dirty_Log      = 1 << 4,   // 有新日志
 		Dirty_LogReset = 1 << 5,   // 日志被清空
 		Dirty_Alert    = 1 << 6,   // 有新的弹窗事件
-		Dirty_All      = (1 << 7) - 1,
+		Dirty_Stats    = 1 << 7,   // 统计 / 结果文件
+		Dirty_All      = (1 << 8) - 1,
 	};
 
 	static constexpr size_t kMaxLogEntries = 5000;
@@ -34,6 +35,7 @@ public:
 	std::vector<PortEntry>   availablePorts() const;
 	std::vector<LogEntry>    logsSince(uint64_t seq) const;
 	std::vector<AlertEvent>  takeAlerts();
+	StatsSnapshot            stats() const;
 	uint32_t                 consumeDirtyFlags() { return m_dirty.exchange(Dirty_None); }
 
 	// ---- 持久化（与 UI dirty flags 相互独立：UI 消费 dirty 不影响保存判断）
@@ -46,6 +48,7 @@ public:
 	int  addStation();                                   // 返回新工位编号，满则返回 0
 	bool removeStation(int no);
 	bool setStationPort(int no, const std::string& port);  // 用户配置，计入持久化
+	bool setStationPortType(int no, PortType type);       // 用户配置，计入持久化（同时清空端口）
 	bool updateStation(int no, const std::function<void(StationInfo&)>& fn);  // 仅运行时字段
 	void updateAllStations(const std::function<void(StationInfo&)>& fn);
 	void setConfig(const TestConfig& cfg);
@@ -53,6 +56,9 @@ public:
 	void appendLog(LogLevel level, std::string text);
 	void clearLog();
 	uint64_t pushAlert(AlertEvent ev);                   // 返回分配的 alert id
+	void recordVerdict(int no, Verdict v);               // 统计一轮结果
+	void resetStats();
+	void setResultFile(const std::string& path);
 
 private:
 	void markDirty(uint32_t f) { m_dirty.fetch_or(f); }
@@ -67,6 +73,8 @@ private:
 	std::vector<AlertEvent>  m_alerts;
 	uint64_t                 m_alertSeq = 0;
 	uint64_t                 m_persistRevision = 0;
+	std::vector<StationStats> m_stats;
+	std::string              m_resultFile;
 	std::atomic<uint32_t>    m_dirty{ Dirty_All };
 };
 

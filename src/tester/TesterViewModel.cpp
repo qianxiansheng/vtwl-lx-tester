@@ -25,8 +25,12 @@ void TesterViewModel::sync()
 		for (const auto& s : src) {
 			StationVM vm;
 			vm.no = s.no;
+			vm.portType = s.portType;
 			vm.port = s.port;
+			vm.board = s.board;
 			vm.dut = s.dut;
+			vm.boardNote = s.boardNote;
+			vm.dutNote = s.dutNote;
 			vm.state = s.state;
 			vm.verdict = s.lastVerdict;
 			for (int i = 0; i < kTestItemCount; ++i)
@@ -37,6 +41,30 @@ void TesterViewModel::sync()
 
 	if (flags & TesterModel::Dirty_Ports)
 		m_ports = m_model->availablePorts();
+
+	if (flags & TesterModel::Dirty_Stats) {
+		const StatsSnapshot snap = m_model->stats();
+		m_resultFile = snap.resultFile;
+		m_statsRows.clear();
+		StatsRowVM total;
+		total.label = "合计";
+		auto yieldOf = [](const StatsRowVM& r) -> std::string {
+			if (r.pass + r.fail == 0) return "--";
+			char buf[16];
+			snprintf(buf, sizeof(buf), "%.1f%%", r.pass * 100.0 / (r.pass + r.fail));
+			return buf;
+		};
+		for (const auto& s : snap.stations) {
+			StatsRowVM r;
+			r.label = "工位#" + std::to_string(s.no);
+			r.tested = s.tested; r.pass = s.pass; r.fail = s.fail; r.abort = s.abort;
+			r.yieldText = yieldOf(r);
+			total.tested += r.tested; total.pass += r.pass; total.fail += r.fail; total.abort += r.abort;
+			m_statsRows.push_back(std::move(r));
+		}
+		total.yieldText = yieldOf(total);
+		m_statsRows.push_back(std::move(total));
+	}
 
 	if (flags & TesterModel::Dirty_Config)
 		m_config = m_model->config();
@@ -113,20 +141,25 @@ bool TesterViewModel::canAddStation() const
 	return m_stations.size() < kMaxStations && m_global != GlobalState::Testing;
 }
 
+// 端口未打开（未连接 / 打开失败 / 已断开）
+static bool linkClosed(const StationVM& s)
+{
+	return s.board == BoardState::Disconnected || s.board == BoardState::Error;
+}
+
 bool TesterViewModel::canEditStation(const StationVM& s) const
 {
-	return m_global != GlobalState::Testing && s.dut == DutState::Disconnected;
+	return m_global != GlobalState::Testing && linkClosed(s);
 }
 
 bool TesterViewModel::canConnect(const StationVM& s) const
 {
-	return m_global != GlobalState::Testing && !s.port.empty()
-		&& (s.dut == DutState::Disconnected || s.dut == DutState::Error);
+	return m_global != GlobalState::Testing && linkClosed(s) && !s.port.empty();
 }
 
 bool TesterViewModel::canDisconnect(const StationVM& s) const
 {
-	return m_global != GlobalState::Testing && s.dut != DutState::Disconnected;
+	return m_global != GlobalState::Testing && !linkClosed(s);
 }
 
 // ---------------------------------------------------------------- 命令
@@ -134,6 +167,8 @@ bool TesterViewModel::canDisconnect(const StationVM& s) const
 void TesterViewModel::addStation()                 { if (canAddStation()) m_service->addStation(); }
 void TesterViewModel::removeStation(int no)        { m_service->removeStation(no); }
 void TesterViewModel::selectPort(int no, const std::string& port) { m_service->selectPort(no, port); }
+void TesterViewModel::setPortType(int no, PortType type) { m_service->setPortType(no, type); }
+void TesterViewModel::resetStats()                 { m_service->resetStats(); }
 void TesterViewModel::connect(int no)              { m_service->connectStation(no); }
 void TesterViewModel::disconnect(int no)           { m_service->disconnectStation(no); }
 void TesterViewModel::refreshPorts()               { m_service->refreshPorts(); }
@@ -158,35 +193,31 @@ ItemVM TesterViewModel::toItemVM(TestItem item, const ItemResult& r)
 {
 	ItemVM vm;
 	vm.state = r.state;
-	if (r.valueCount <= 0 || r.state == ItemState::Abort) {
-		if (r.state == ItemState::Abort) vm.detailText = "执行异常，无有效测量值";
+
+	// 悬停提示：说明 + result_code + 执行次数
+	std::string detail = r.note;
+	if (r.resultCode > 0) {
+		char buf[32];
+		snprintf(buf, sizeof(buf), "result_code=0x%02X", r.resultCode);
+		detail += detail.empty() ? buf : std::string("\n") + buf;
+	}
+	if (r.attempts > 1)
+		detail += (detail.empty() ? "" : "\n") + std::string("执行次数：") + std::to_string(r.attempts);
+	vm.detailText = detail;
+
+	if (r.valueCount <= 0 || r.state == ItemState::Abort || r.state == ItemState::Running) {
+		if (r.state == ItemState::Running && !r.note.empty()) vm.valueText = r.note;
 		return vm;
 	}
 
-	char brief[48] = "", detail[96] = "";
+	char brief[48] = "";
 	const auto& v = r.values;
 	switch (item) {
-	case TestItem::RfPacket:
-		if (r.valueCount >= 2) {
-			snprintf(brief, sizeof(brief), "%.1f%% / %.1f%%", v[0], v[1]);
-			snprintf(detail, sizeof(detail), "收包率 %.1f%%，发包率 %.1f%%", v[0], v[1]);
-		}
-		else {
-			snprintf(brief, sizeof(brief), "%.1f%%", v[0]);
-			snprintf(detail, sizeof(detail), "收包率 %.1f%%", v[0]);
-		}
-		break;
-	case TestItem::FreqOffset:
-		snprintf(brief, sizeof(brief), "%+.1f KHz", v[0]);
-		snprintf(detail, sizeof(detail), "频偏 %+.1f KHz", v[0]);
-		break;
-	case TestItem::Power:
-		snprintf(brief, sizeof(brief), "%.1f uA", v[0]);
-		snprintf(detail, sizeof(detail), "功耗 %.1f uA", v[0]);
-		break;
+	case TestItem::RfPacket:   snprintf(brief, sizeof(brief), "%.1f%% / %.1f%%", v[0], v[1]); break;
+	case TestItem::FreqOffset: snprintf(brief, sizeof(brief), "%+.2f KHz", v[0]); break;
+	case TestItem::Power:      snprintf(brief, sizeof(brief), "%.0f uA", v[0]); break;
 	}
 	vm.valueText = brief;
-	vm.detailText = detail;
 	return vm;
 }
 

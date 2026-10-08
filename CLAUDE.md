@@ -19,10 +19,10 @@ msbuild lxTester.vcxproj /p:Configuration=Debug /p:Platform=x64
 - Output goes to `$(SolutionDir)..\bin\<Platform>\<Config>\` and intermediates to `..\tmp\...`. When you build the vcxproj directly, that means `../bin` and `../tmp`, outside the repo.
 - Prebuilt libs are checked in locally under `thirdparty/glfw/lib/<Platform>` and `thirdparty/wjwwood/lib/<Config>/<Platform>` (`*.lib` is gitignored).
 - Include dirs: `src`, `src/imgui`, `src/imgui/backends`, `src/imgui/extensions`, `thirdparty/glfw/include`, `thirdparty/wjwwood/include`, `thirdparty/nlohmann/include` (nlohmann/json v3.11.3, a single header).
-- **Which files get compiled is controlled by the vcxproj, not by what's in `src/`.** Right now it compiles `main.cpp`, `ui_main.cpp`, `tester/*.cpp`, `utils/*`, and the imgui sources. `Domain.cpp`, `Model.cpp`, and `main_lxrecorder.cpp` are **not** in the project. If you add new .cpp files, add them to `lxTester.vcxproj` (and `.filters`).
+- **Which files get compiled is controlled by the vcxproj, not by what's in `src/`.** Right now it compiles `main.cpp`, `ui_main.cpp`, `protocol/*.cpp`, `link/*.cpp`, `tester/*.cpp`, `utils/*`, and the imgui sources. `Domain.cpp`, `Model.cpp`, and `main_lxrecorder.cpp` are **not** in the project. If you add new .cpp files, add them to `lxTester.vcxproj` (and `.filters`).
 - The project compiles with `/utf-8`. All sources are UTF-8 without a BOM.
 - `main.cpp` and `main_lxrecorder.cpp` both define `main_init`/`main_gui`, so only one of them can be compiled at a time.
-- There are no tests and no lint setup.
+- There are no tests and no lint setup. To check the protocol codec without the GUI, compile a throwaway `main` together with `src/protocol/BoardProtocol.cpp` using `cl /std:c++20 /utf-8`. That file has no dependencies. Use the simulated test boards for everything else (see below).
 
 The window starts at 1280×880 scaled by monitor DPI (capped to the work area) and can be resized freely. Inside it is an ImGui dockspace. The dock layout is saved to `imgui.ini`, and user settings to `config.json`; both live in the working directory. It also loads the font `C:/Windows/Fonts/msyh.ttc`, which is needed for Chinese text.
 
@@ -30,22 +30,38 @@ The window starts at 1280×880 scaled by monitor DPI (capped to the work area) a
 
 **UI shell (`ui_main.cpp` / `ui_main.h`)**: owns `WinMain`/`main`, the GLFW window, the OpenGL3 context, and the ImGui frame loop. Each frame it drains the `PostToUI` task queue, then calls the app hooks `main_init(argc, argv)` (once) and `main_gui()` (every frame; a non-zero return closes the window). `UiDpiContext` (singleton) handles DPI scaling and font rebuilding. `CreateTexture`/`DeleteTexture` are the GL texture adapters used by ImFileDialog. `APP_TITLE` and helper macros are in `pch.h`.
 
-**App layer (`main.cpp`)**: implements `main_init`/`main_gui`/`main_shutdown`. It wires up the tester MVVM objects and creates the root window with a dockspace and a menu bar. The 视图 (View) menu toggles panels and resets the layout, and the 调试 (Debug) menu injects demo data and alerts from the business thread. `BuildDefaultDockLayout` builds the default layout when `imgui.ini` has no `TesterDockSpace` node. The panel window names in `TesterView.h` (`kXxxWindow`) are the dock IDs, so renaming one invalidates saved layouts.
+**App layer (`main.cpp`)**: implements `main_init`/`main_gui`/`main_shutdown`. It wires up the tester MVVM objects and creates the root window with a dockspace and a menu bar. The 视图 (View) menu toggles panels and resets the layout, and the 调试 (Debug) menu holds the simulated test-board settings (fault injection) and alert demos. `BuildDefaultDockLayout` builds the default layout when `imgui.ini` has no `TesterDockSpace_v2` node. Bump that name whenever the set of panels changes. The panel window names in `TesterView.h` (`kXxxWindow`) are the dock IDs, so renaming one invalidates saved layouts.
+
+**Protocol (`src/protocol/`, `Lx::Proto`)**: implements the host-to-test-board protocol from `产测协议规范.md`. Each frame is `55 AA | TID(LE) | OpCode(**BE**) | Len | Payload(≤54) | CRC16-MODBUS(LE) | 33`. An ack's OpCode is the request's OpCode `| 0x8000`. `FrameParser` reassembles a byte stream and resyncs by dropping one byte when it hits a bad header, length, CRC or tail. Every ack payload starts with `result_code`. When `rc != RET_OK`, only the rc is guaranteed to be present.
+
+**Link (`src/link/`, `Lx::Link`)**:
+- `ITransport`: a byte-stream transport whose callbacks run on its own IO thread. Two implementations exist:
+  - `SerialTransport`, built directly on `serial::Serial`. Any read exception means the port was physically disconnected.
+  - `SimTransport`, a simulated test board plus DUT. Port names `SIM1`..`SIM6` select it. Its behaviour is controlled by the global `SimSettings`, which the 调试 → 模拟测试板 menu edits.
+- `BoardLink`: one per port, used only on the business thread. It matches replies by TID, runs a per-request timeout, sends a 500 ms `ALIVE` heartbeat, and reports the board lost after 3 consecutive timeouts or a transport close. After a loss or `close()`, pending replies are dropped and never called back.
+- `IEventLoop`: `post`, `after`, `cancel`. `TesterService` implements it.
+- USB is reserved in the UI only (`kUsbVid`/`kUsbPid` = 0).
 
 **Tester (`src/tester/`, namespace `Lx::Tester`)**: MVVM split. ImGui has no data binding, so dirty flags stand in for it.
 - `TesterTypes.h`: the domain enums and structs (global, DUT, station and test-item states, `TestConfig`, `AlertEvent`). No ImGui here.
 - `TesterModel`: a thread-safe store and the single source of truth. Every setter ORs a `Dirty_*` bit. Logs carry a monotonically increasing `seq` so the UI can fetch them incrementally. Alerts sit in a queue that is drained with `takeAlerts()`.
-- `TesterService` (implements `ITesterService`): owns the business thread. Every command is posted to that thread and returns immediately, and the thread is the only writer of the model. Right now it only does data management (add/remove stations, pick ports, config, logs). Connect, test, and scheduling are `TODO` stubs.
+- `TesterService` (implements `ITesterService`, `IEventLoop`, `IStationHost`): owns the business thread, an event loop of a task queue plus timers that never blocks. Every UI command is posted to that thread, and only that thread writes the model. It also owns the global state machine (`recomputeGlobal`), the FIFO RF lock (`acquireRf`/`releaseRf`), the per-round CSV (`ResultCsv`, `results/results_YYYYMMDD.csv`, UTF-8 with a BOM) and the statistics.
+- `StationController`: one per station, and the place where the protocol flow lives.
+  - Connect: open the port → first heartbeat ack (board connected) → `GET_VERSION` → `CONN_CHECK_DUT`. If the DUT isn't ready, the handshake retries every 1 s, but only while the station is not testing and not finished.
+  - Each test item: start op → poll `GET_TEST_STATUS` every poll interval until idle or error → `GET_RESULT` → judge on the host.
+  - Order: 收发包 → 频偏 while holding the RF lock, then 功耗, then `RESET_DUT` + `CONN_CHECK_DUT`.
+  - Retries: an ABORT that wasn't caused by the emergency stop is retried after `RESET_DUT` + `CONN_CHECK_DUT`. FAIL is never retried.
+  - Async callbacks are guarded by `m_connGen`/`m_testGen` plus a `weak_ptr` (`guardConn`/`guardTest`). Bump the matching generation whenever you abandon a flow.
 - `TesterViewModel`: used on the UI thread only, with no locks. `sync()` runs once per frame at the start of `main_gui`. It consumes the dirty flags and re-snapshots only the parts that changed (formatted strings, an alert deque). It also exposes `canXxx()` enable rules and forwards commands to the service.
-- `TesterView`: plain ImGui drawing that touches only the ViewModel. There is one dockable window per panel: 控制台 (console), 工位管理 (stations), 测试参数 (parameters), 日志 (log). Log selection state (a range of seqs) lives in the VM, and copying text goes through `ImGui::SetClipboardText`.
-- `TesterConfigStore`: maps `PersistentConfig` (per-test `TestConfig` plus station numbers and ports) to and from `config.json`. Each test config is a shared `common` part (retry count) plus its own thresholds. Loading tolerates missing fields and clamps values with `sanitize()`; a corrupt file is copied to `config.json.bad`. Saving writes `*.tmp` first and then renames it over the original.
+- `TesterView`: plain ImGui drawing that touches only the ViewModel. There is one dockable window per panel: 控制台 (console), 工位管理 (stations), 测试参数 (parameters), 日志 (log), 统计 (statistics; it shares a tab group with the log). Log selection state (a range of seqs) lives in the VM, and copying text goes through `ImGui::SetClipboardText`.
+- `TesterConfigStore`: maps `PersistentConfig` (per-test `TestConfig` + `CommConfig`, plus station number, port type and port) to and from `config.json`. Each test config is a shared `common` part (retry count) plus its own thresholds. Loading tolerates missing fields and clamps values with `sanitize()`; a corrupt file is copied to `config.json.bad`. Saving writes `*.tmp` first and then renames it over the original.
 - Persistence: the model bumps `m_persistRevision` only on user-config changes. Runtime-only station fields go through `updateStation`; port changes must go through `setStationPort`. The service loads the config when its thread starts, saves every 5 s if the revision changed, and saves once more on exit. Before saving on exit it drains any commands still queued.
 - Data flow: View → VM command → `ITesterService` (business thread) → `TesterModel` setter + dirty bit → `VM::sync()` → View.
 - Alerts from the business thread: call `notify()`/`confirm()` inside the service. This pushes an `AlertEvent` into the model. The VM queues it and `View::DrawAlert` shows the head of the queue. For `Confirm`, the user's answer travels back through `replyAlert(id, accepted)`, and the business thread runs the callback stored for that id. The alert window is non-modal and sits over the log area, so it never blocks the emergency stop.
 
 **Legacy recorder code**: `main_lxrecorder.cpp` and `Model.h` (`BusinessThread`/`DataModel`, with INI autosave to `config.ini`) are the recorder's version of this same pattern, kept for reference.
 
-**Serial abstraction (`Domain.h/.cpp`, namespace `Lx::Domain`)**: `ISerialPort` provides sync and async open/send/recv. `SerialPortLibSerial` wraps wjwwood `serial::Serial` and uses a worker thread with a send queue and a data callback. `SerialPortWin` is an unimplemented stub, and WinUSB support doesn't exist yet.
+**Legacy serial abstraction (`Domain.h/.cpp`, not compiled)**: this is the recorder's serial wrapper. Its worker thread swallows I/O errors, so it can't detect an unplugged port. The tester uses `link/SerialTransport.cpp` instead.
 
 **Utilities**: `utils/thread_pool.h`, `utils/concurrentqueue` (moodycamel), and `utils/INIReader` + `ini.c` (inih). `utils/utils.h` provides string/encoding helpers and `utils::Alert`. `BinFileWriter.h` handles async binary file writes (recorder-specific).
 
