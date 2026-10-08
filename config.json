@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "tests": {
+    "rfPacket": {
+      "common": {
+        "retryCount": 1
+      },
+      "minRxRatePct": 94.0,
+      "minTxRatePct": 95.0
+    },
+    "freqOffset": {
+      "common": {
+        "retryCount": 2
+      },
+      "maxAbsOffsetKHz": 50.0
+    },
+    "power": {
+      "common": {
+        "retryCount": 0
+      },
+      "maxPowerUA": 100.0
+    }
+  },
+  "stations": [
+    {
+      "no": 1,
+      "port": ""
+    },
+    {
+      "no": 2,
+      "port": ""
+    },
+    {
+      "no": 3,
+      "port": ""
+    }
+  ]
+}

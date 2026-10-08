@@ -1,167 +1,35 @@
 #include "pch.h"
 
-#include <iostream>
-#include <windows.h>
-#include <vector>
-#include <unordered_map>
-#include <filesystem>
-#include <sstream>
-#include "winbase.h"
 #include <memory>
-#include <chrono>
 
 #include "imgui.h"
 #include "imgui_internal.h"
-#include "imgui_impl_win32.h"
-#include "imgui/extensions/ImConsole.h"
 #include "imgui/extensions/ImFileDialog.h"
 
-#include "utils/utils.h"
-#include "utils/thread_pool.h"
 #include "ui_main.h"
-#include <fstream>
+#include "tester/TesterModel.h"
+#include "tester/TesterService.h"
+#include "tester/TesterViewModel.h"
+#include "tester/TesterView.h"
 
-#define OPEN_WORDS_FILE_FILE_DIALOG_KEY "open_words_file_dialog"
-
-#define SERIAL_PORT_MAX_NUM 6
+namespace View = Lx::Tester::View;
 
 static bool show_root_window = true;
-static bool opt_fullscreen = true;
 static bool opt_showdemowindow = false;
-static bool opt_showmainwindow = true;
+static bool opt_showconsole = true;
+static bool opt_showstations = true;
+static bool opt_showconfig = true;
+static bool opt_showlog = true;
+static bool opt_resetlayout = false;
 
-static uint32_t port_color[] = {
-	0xFFFF8080,
-	0xFFFFBF80,
-	0xFFFFFF80,
-	0xFFBFFF80,
-	0xFF80FF80,
-	0xFF80FFBF,
-	0xFF80FFFF,
-	0xFF80BFFF,
-	0xFF8080FF,
-	0xFFBF80FF,
-	0xFFFF80FF,
-	0xFFFF80BF,
-	0xFFFF4242,
-	0xFF42FFFF,
-	0xFFCC66CC,
-	0xFF66CC66,
-	0xFFCC9966,
-	0xFF66CC99,
-	0xFF6666CC,
-	0xFF6699CC,
-};
-
-std::shared_ptr<ThreadPool> g_pool;
-
-struct SerialPort {
-	bool enable = false;
-	char portName[32] = "COM0";
-	char baudText[32] = "9600";
-	uint8_t distance = 0;
-	std::string noiseLevelText = "low";
-	bool isOpen = false;
-};
-
-struct RecWord {
-	char id[32] = "";
-	char name[32] = "";
-	int flag = 0;
-};
-
-enum BgMusicType {
-	None = 0,
-	Vocal = 1,
-	Music = 2,
-};
-
-const char8_t* bgMusicType_Text[] = { 
-	u8"无音乐", 
-	u8"人声", 
-	u8"音乐" 
-};
-
-const std::string bgMusicType_Tag[] = {
-	"N",
-	"V",
-	"M"
-};
-
-struct RoundConfig {
-	int bg_music_index = 0;
-	BgMusicType bg_music_type = BgMusicType::None;
-	const char8_t* bg_music_type_text = bgMusicType_Text[BgMusicType::None];
-};
-
-struct ViewModel {
-	bool running = false;
-	bool paused = false;
-	uint32_t curr_index = 0;
-	bool scroll_request = false;
-	char project_id[64] = { 0 };
-	char person_id[64] = { 0 };
-	int gender = 0;
-	char hometown[128] = { 0 };
-	int age = 25;
-	std::vector<RecWord> recWords = {};
-	std::vector<SerialPort> serialPorts{6};
-
-	std::string record_text_content = "";
-
-	bool running_ex = false;
-	uint16_t round_limit = 6;
-	uint16_t round_count = 6;
-	std::vector<RoundConfig> roundConfigs{6};
-	uint32_t current_round = 0;
-} vm;
-
-struct Config {
-	double factor = 1.0;
-	double silence_tail_duration = 1.0;
-	double silence_head_duration = 2.0;
-	double music_head_duration = 2.0;
-} acfg;
-
-ImVec4 clear_color = ImVec4(0.35f, 0.35f, 0.35f, 1.00f);
-
-using TimerFunc = std::function<void()>;
-struct Timer
-{
-	bool running = false;
-	double last_time = 0.0f;
-	double duration = 1.0f;
-	TimerFunc callback;
-};
-
-void timer_start(Timer& t, double seconds, std::function<void()> cb)
-{
-	t.running = true;
-	t.last_time = ImGui::GetTime();
-	t.duration = seconds;
-	t.callback = cb;
-}
-
-void timer_update(Timer& t)
-{
-	if (!t.running) return;
-
-	double now = ImGui::GetTime();
-	if (now - t.last_time >= t.duration)
-	{
-		t.running = false;  // 执行完自动停止
-		if (t.callback) t.callback(); // 触发回调
-	}
-}
-
-bool timer_running(Timer& t)
-{
-	return t.running;
-}
+// Model（数据） <- Service（业务线程，写 Model） ; ViewModel（UI 线程，读 Model 快照，发命令给 Service）
+static std::shared_ptr<Lx::Tester::TesterModel>     g_model;
+static std::shared_ptr<Lx::Tester::TesterService>   g_service;
+static std::unique_ptr<Lx::Tester::TesterViewModel> g_vm;
 
 bool main_init(int argc, char* argv[])
 {
-	// Enable Dock
+	// Enable Dock（布局保存在 imgui.ini）
 	ImGuiIO& io = ImGui::GetIO(); (void)io;
 	io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
@@ -176,95 +44,143 @@ bool main_init(int argc, char* argv[])
 		DeleteTexture(tex);
 		};
 
-	g_pool = std::make_shared<ThreadPool>(25);
+	g_model = std::make_shared<Lx::Tester::TesterModel>();
+	g_service = std::make_shared<Lx::Tester::TesterService>(g_model, "config.json");
+	g_vm = std::make_unique<Lx::Tester::TesterViewModel>(g_model, g_service);
+
+	g_service->refreshPorts();
 
 	return true;
 }
 
 void main_shutdown(void)
 {
+	g_vm.reset();
+	if (g_service) g_service->stop();   // 业务线程退出前会保存一次 config.json
+	g_service.reset();
+	g_model.reset();
 }
 
-static void ShowMainWindow(bool* p_opt_showmainwindow)
+// 默认布局：
+// +-----------------------------+
+// | 控制台                      |
+// +-----------------------------+
+// | 工位管理                    |
+// +----------+------------------+
+// | 测试参数 | 日志             |
+// +----------+------------------+
+static void BuildDefaultDockLayout(ImGuiID dockspace_id, ImVec2 size)
 {
-	bool show_alert_please_select_port = false;
+	const ImGuiStyle& st = ImGui::GetStyle();
+	const float fh = ImGui::GetFrameHeight();
+	const float fhs = ImGui::GetFrameHeightWithSpacing();
+	const float chrome = fh + st.WindowPadding.y * 2;   // 标签栏 + 内边距
 
-	ImGui::Begin("Main Window", p_opt_showmainwindow);
+	// 按内容估算高度（与 TesterView 中的尺寸一致），再换算成比例
+	const float consoleH = chrome + fh * 1.8f + fh * 2.2f + st.ItemSpacing.y;
+	const float cardH = fh * 1.25f + fhs * 8 + st.ItemSpacing.y * 3 + st.WindowPadding.y * 2;
+	const float stationsH = chrome + fh * 1.6f + st.ItemSpacing.y + cardH + st.ScrollbarSize + st.ItemSpacing.y * 2;
 
-	ImGui::End();
+	ImGui::DockBuilderRemoveNode(dockspace_id);
+	ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+	ImGui::DockBuilderSetNodeSize(dockspace_id, size);
 
-	utils::Alert(show_alert_please_select_port, "Message##m2", "Please select at least one.");
+	ImGuiID rest = 0, bottom = 0, logNode = 0;
+	ImGuiID consoleNode = ImGui::DockBuilderSplitNode(dockspace_id, ImGuiDir_Up, consoleH / size.y, nullptr, &rest);
+	ImGuiID stationsNode = ImGui::DockBuilderSplitNode(rest, ImGuiDir_Up, stationsH / (size.y - consoleH), nullptr, &bottom);
+	ImGuiID configNode = ImGui::DockBuilderSplitNode(bottom, ImGuiDir_Left, 0.36f, nullptr, &logNode);
+
+	ImGui::DockBuilderDockWindow(View::kConsoleWindow, consoleNode);
+	ImGui::DockBuilderDockWindow(View::kStationsWindow, stationsNode);
+	ImGui::DockBuilderDockWindow(View::kConfigWindow, configNode);
+	ImGui::DockBuilderDockWindow(View::kLogWindow, logNode);
+	ImGui::DockBuilderFinish(dockspace_id);
 }
 
 static void ShowRootWindowMenu()
 {
 	if (ImGui::BeginMenuBar()) {
 
-		if (ImGui::BeginMenu("File")) {
-
-			if (ImGui::MenuItem("Open ini")) {
-			}
-
-			if (ImGui::MenuItem("Save", "Ctrl + S")) {
-			}
-
-			ImGui::EndMenu();
-		}
-
-		if (ImGui::BeginMenu("Option")) {
-
+		if (ImGui::BeginMenu("视图")) {
+			ImGui::MenuItem("控制台", NULL, &opt_showconsole);
+			ImGui::MenuItem("工位管理", NULL, &opt_showstations);
+			ImGui::MenuItem("测试参数", NULL, &opt_showconfig);
+			ImGui::MenuItem("日志", NULL, &opt_showlog);
+			ImGui::Separator();
+			if (ImGui::MenuItem("重置布局"))
+				opt_resetlayout = true;
+			ImGui::Separator();
 			ImGui::MenuItem("Demo Window", NULL, &opt_showdemowindow);
-			ImGui::Separator();
-			ImGui::MenuItem("Main Window", NULL, &opt_showmainwindow);
-
-			ImGui::Separator();
 			ImGui::EndMenu();
 		}
+
+		if (ImGui::BeginMenu("调试")) {
+			auto& svc = g_vm->service();
+			if (ImGui::MenuItem("模拟业务告警（通知）"))
+				svc.debugRaiseAlert(Lx::Tester::AlertKind::Notify);
+			if (ImGui::MenuItem("模拟业务告警（确认）"))
+				svc.debugRaiseAlert(Lx::Tester::AlertKind::Confirm);
+			ImGui::Separator();
+			if (ImGui::MenuItem("填充演示数据"))
+				svc.debugFillDemoData();
+			if (ImGui::MenuItem("切换全局状态"))
+				svc.debugCycleGlobalState();
+			ImGui::EndMenu();
+		}
+
 		ImGui::EndMenuBar();
 	}
 }
 
 static void ShowRootWindow(bool* p_open)
 {
-	ImGuiWindowFlags window_flags = ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking;
+	const ImGuiViewport* viewport = ImGui::GetMainViewport();
+	ImGui::SetNextWindowPos(viewport->WorkPos);
+	ImGui::SetNextWindowSize(viewport->WorkSize);
+	ImGui::SetNextWindowViewport(viewport->ID);
 
-	if (opt_fullscreen) {
-		const ImGuiViewport* viewport = ImGui::GetMainViewport();
-		ImGui::SetNextWindowPos(viewport->WorkPos);
-		ImGui::SetNextWindowSize(viewport->WorkSize);
-		ImGui::SetNextWindowViewport(viewport->ID);
-		window_flags |= ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
+	// NoBringToFrontOnFocus：点击停靠的面板时，业务弹窗仍保持在最上层
+	ImGuiWindowFlags window_flags = ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking
+		| ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoResize
+		| ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoBringToFrontOnFocus;
 
-		ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-		ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-	}
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
 	ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
-
 	ImGui::Begin("-", p_open, window_flags);
+	ImGui::PopStyleVar(3);
 
-	if (opt_fullscreen) {
-		ImGui::PopStyleVar();	// WindowBorderSize
-		ImGui::PopStyleVar();	// WindowRounding
+	// 首次运行（imgui.ini 中没有该 dockspace）或用户要求时构建默认布局
+	ImGuiID dockspace_id = ImGui::GetID("TesterDockSpace");
+	if (opt_resetlayout || ImGui::DockBuilderGetNode(dockspace_id) == nullptr) {
+		opt_resetlayout = false;
+		opt_showconsole = opt_showstations = opt_showconfig = opt_showlog = true;
+		BuildDefaultDockLayout(dockspace_id, ImGui::GetContentRegionAvail());
 	}
-	ImGui::PopStyleVar();	// WindowPadding
-
-	ImGuiID dockspace_id = ImGui::GetID("MyDockSpace");
-	ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_AutoHideTabBar);
+	ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_None);
 
 	ShowRootWindowMenu();
 
 	ImGui::End();
+
+	if (opt_showconsole)  View::DrawConsole(*g_vm, &opt_showconsole);
+	if (opt_showstations) View::DrawStations(*g_vm, &opt_showstations);
+	if (opt_showconfig)   View::DrawConfig(*g_vm, &opt_showconfig);
+	if (opt_showlog)      View::DrawLog(*g_vm, &opt_showlog);
+
+	// 弹窗在日志面板之后绘制，以便定位到日志面板上方
+	View::DrawAlert(*g_vm);
+
 	if (opt_showdemowindow) {
 		ImGui::ShowDemoWindow(&opt_showdemowindow);
-	}
-
-	if (opt_showmainwindow) {
-		ShowMainWindow(&opt_showmainwindow);
 	}
 }
 
 int main_gui()
 {
+	// 消费 Model 的 dirty flags，刷新 ViewModel 快照
+	g_vm->sync();
+
 	ShowRootWindow(&show_root_window);
 
 	return 0;

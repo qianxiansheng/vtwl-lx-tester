@@ -1,6 +1,7 @@
 
 
 #define APP_TITLE           "VtWl 产测上位机"
+#define APP_VERSION         "v0.1.0"
 #define DEFAULT_FONT		"c:\\Windows\\Fonts\\msyh.ttc"
 
 #define ImGuiDCXAxisAlign(v) ImGui::SetCursorPos(ImVec2((v), ImGui::GetCursorPos().y))

@@ -222,9 +222,25 @@ int main_(int argc, char** argv)
 #endif
 
     // Create window with graphics context
-    window = glfwCreateWindow(1280, 720, APP_TITLE, NULL, NULL);
+    window = glfwCreateWindow(1280, 880, APP_TITLE, NULL, NULL);
     if (window == NULL)
         return 1;
+
+    // 初始尺寸按 DPI 缩放（字体同样按 DPI 缩放），并限制在主显示器工作区内居中；之后用户可自由拖拽调整
+    {
+        GLFWmonitor* monitor = glfwGetPrimaryMonitor();
+        float sx = 1.0f, sy = 1.0f;
+        glfwGetMonitorContentScale(monitor, &sx, &sy);
+        int wx, wy, ww, wh;
+        glfwGetMonitorWorkarea(monitor, &wx, &wy, &ww, &wh);
+        int fl, ft, fr, fb;
+        glfwGetWindowFrameSize(window, &fl, &ft, &fr, &fb);
+        int w = (int)(1280 * sx), h = (int)(880 * sy);
+        if (w > ww - fl - fr) w = ww - fl - fr;
+        if (h > wh - ft - fb) h = wh - ft - fb;
+        glfwSetWindowSize(window, w, h);
+        glfwSetWindowPos(window, wx + fl + (ww - fl - fr - w) / 2, wy + ft + (wh - ft - fb - h) / 2);
+    }
 
 #if defined(WITH_SOURCE)
     // Load ICON
