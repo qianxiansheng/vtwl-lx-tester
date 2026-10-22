@@ -182,6 +182,11 @@ bool TesterViewModel::canDisconnect(const StationVM& s) const
 	return m_global != GlobalState::Testing && !linkClosed(s);
 }
 
+bool TesterViewModel::canChangeMode() const
+{
+	return m_global != GlobalState::Testing;
+}
+
 // ---------------------------------------------------------------- 命令
 
 void TesterViewModel::addStation()                 { if (canAddStation()) m_service->addStation(); }

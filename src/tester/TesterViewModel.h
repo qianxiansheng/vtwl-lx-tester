@@ -82,6 +82,7 @@ public:
 	bool canEditStation(const StationVM& s) const;      // 选端口 / 移除
 	bool canConnect(const StationVM& s) const;
 	bool canDisconnect(const StationVM& s) const;
+	bool canChangeMode() const;
 	bool canStart() const { return m_global == GlobalState::Ready; }
 	bool canNextRound() const { return m_global == GlobalState::Finished; }
 	bool canEmergencyStop() const { return true; }      // 紧急停止永远可用

@@ -33,6 +33,7 @@
   "comm": {
     "cmdTimeoutMs": 200,
     "connCheckTimeoutMs": 600,
+    "heartbeatTimeoutMs": 500,
     "pollIntervalMs": 100,
     "baudRate": 115200,
     "usbVid": 0,

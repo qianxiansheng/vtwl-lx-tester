@@ -137,6 +137,7 @@ void StationController::connect()
 		transport = Link::makeSerialTransport(info.port, static_cast<uint32_t>(cfg.comm.baudRate));
 
 	BoardLink::Timings t;
+	t.heartbeatMs = static_cast<uint32_t>(cfg.comm.heartbeatTimeoutMs);
 	t.timeoutMs = static_cast<uint32_t>(cfg.comm.cmdTimeoutMs);
 	m_link = BoardLink::create(m_host.loop(), std::move(transport), t);
 	m_port = info.port;
@@ -326,33 +327,54 @@ void StationController::startRound()
 	m_holdsRf = false;
 	m_host.loop().cancel(m_dutRetryTimer);
 
+	const TestConfig cfg = m_host.config();
 	const std::string fw = m_record.boardFw, hw = m_record.boardHw;
 	m_record = RoundRecord{};
 	m_record.no = m_no;
 	m_record.port = m_port;
 	m_record.boardFw = fw;
 	m_record.boardHw = hw;
-	for (int i = 0; i < kTestItemCount; ++i) setItem(i, ItemResult{});
+	m_mode = cfg.comm.testMode;
+	const TestModeDef* modeDef = FindMode(m_mode);
+	m_localEnableMask = modeDef->enableMask;
+	
+	for (int i = 0; i < kTestItemCount; ++i) {
+		if (HasItem(m_localEnableMask, static_cast<TestItem>(i))) {
+			setItem(i, ItemResult{});
+		}
+		else {
+			ItemResult skipped;
+			skipped.state = ItemState::Skipped;
+			skipped.note = std::string() + modeDef->name + " 忽略测试项";
+			setItem(i, skipped);
+		}
+	}
 	setFtFlag(ItemResult{});
 	m_host.model().updateStation(m_no, [](StationInfo& st) { st.lastVerdict = Verdict::None; });
 	refreshStationState();
 
-	ItemResult waiting;
-	waiting.state = ItemState::Running;
-	waiting.note = "等待 RF 资源";
-	setItem(0, waiting);
+	TestItem firstItem{};
+	int firstItemIdx = static_cast<int>(firstItem);
+	if (GetFirstSetTestItem(m_localEnableMask, firstItem)) {
+		if (IsRfTestItem(firstItem)) {
+			ItemResult waiting;
+			waiting.state = ItemState::Running;
+			waiting.note = "等待 RF 资源";
+			setItem(firstItemIdx, waiting);
+		}
+	}
 
-	m_host.acquireRf(m_no, guardTest([this] {
+	m_host.acquireRf(m_no, guardTest([this, firstItemIdx] {
 		m_holdsRf = true;
 		m_host.log(LogLevel::Info, "工位#" + std::to_string(m_no) + " 获得 RF 资源");
-		runItem(0);
+		runItem(firstItemIdx);
 	}));
 }
 
 void StationController::runItem(int idx)
 {
 	m_attempt = 0;
-	if (idx == static_cast<int>(TestItem::Power) && m_holdsRf) {
+	if (IsLastSetTestItem(m_localEnableMask, static_cast<TestItem>(idx)) && m_holdsRf) {
 		m_holdsRf = false;
 		m_host.releaseRf(m_no);
 		m_host.log(LogLevel::Info, "工位#" + std::to_string(m_no) + " 释放 RF 资源");
@@ -567,7 +589,11 @@ void StationController::abortRemaining(int fromIdx, const std::string& reason)
 
 void StationController::nextItem(int idx)
 {
-	if (idx + 1 < kTestItemCount) runItem(idx + 1);
+	TestItem nextItem{};
+	if (GetNextSetTestItem(m_localEnableMask, idx, nextItem)) {
+		int nextItemIdx = static_cast<int>(nextItem);
+		runItem(nextItemIdx);
+	}
 	else finishTest();
 }
 
@@ -583,10 +609,24 @@ void StationController::finishTest()
 		return;
 	}
 
-	const bool allPass = std::all_of(m_record.items.begin(), m_record.items.end(),
-		[](const ItemResult& r) { return r.state == ItemState::Pass; });
+	const bool allPass = ([this]() {
+		bool pass = true;
+		const int itemCount = static_cast<int>(m_record.items.size());
+		for (int i = 0; i < itemCount; ++i) {
+			if (HasItem(m_localEnableMask, static_cast<TestItem>(i))) {
+				if (m_record.items[i].state != ItemState::Pass) {
+					pass = false;
+					break;
+				}
+			}
+		}
+		return pass;
+	})();
+	
 	if (allPass) {
-		startFtFlag();   // 写标志流程本身包含复位 + 重新握手
+		// 全部测试项通过：只有包含功耗测试流程才需要执行复位+重握手
+		const bool needReset = HasItem(m_localEnableMask, TestItem::Power);
+		startFtFlag(needReset);   // 写标志流程本身包含复位 + 重新握手
 		return;
 	}
 
@@ -629,10 +669,13 @@ void StationController::setFtFlagStep(const std::string& step, int attempt)
 	setFtFlag(r);
 }
 
-void StationController::startFtFlag()
+void StationController::startFtFlag(bool reset)
 {
 	m_host.log(LogLevel::Info, "工位#" + std::to_string(m_no) + " 测试项全部 PASS，开始写入产测标志");
-	ftReset(0);
+	if (reset)
+		ftReset(0);
+	else
+		ftSet(0);
 }
 
 // 1. 复位 DUT，失败按配置重试

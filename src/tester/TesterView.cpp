@@ -27,6 +27,8 @@ const char* const kFtFlagLabel  = "产测标志：";
 
 const char* const kPortTypeNames[] = { "UART", "USB" };
 
+const char* const kTestModeNames[kTestModeCount] = { "ModeA", "ModeB", "ModeC", "ModeD" };
+
 struct Chip {
 	const char* text;
 	ImU32       color;
@@ -502,6 +504,34 @@ void DrawConfig(TesterViewModel& vm, bool* p_open)
 		| (cols > 1 ? ImGuiTableFlags_BordersInnerV : ImGuiTableFlags_None);
 
 	if (ImGui::BeginTable("##config", cols, flags)) {
+
+		ImGui::TableNextColumn();
+		changed |= ConfigGroup("模式设置", nullptr, nullptr, [&] {
+			bool c = false;
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn();
+			ImGui::AlignTextToFramePadding();
+			ImGui::TextUnformatted("测试模式：");
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("测试模式");
+			ImGui::TableNextColumn();
+
+			ImGui::SetNextItemWidth(-FLT_MIN);
+			ImGui::BeginDisabled(!vm.canChangeMode());
+			const int typeIdx = static_cast<int>(cfg.comm.testMode);
+			if (ImGui::BeginCombo("##tmode", kTestModeNames[typeIdx])) {
+				for (int t = 0; t < kTestModeCount; ++t) {
+					if (ImGui::Selectable(kTestModeNames[t], t == typeIdx) && t != typeIdx) {
+						cfg.comm.testMode = static_cast<TestMode>(t);
+						c |= 1;
+					}
+				}
+				ImGui::EndCombo();
+			}
+			ImGui::EndDisabled();
+			return c;
+			});
+		if (cols == 1) ImGui::Spacing();
+
 		ImGui::TableNextColumn();
 		changed |= ConfigGroup("无线收发包测试", "收包率、发包率、RSSI 均 >= 阈值为 PASS", &cfg.rfPacket.common, [&] {
 			bool c = false;
@@ -541,6 +571,7 @@ void DrawConfig(TesterViewModel& vm, bool* p_open)
 			bool c = false;
 			c |= ConfigRowInt("指令超时(ms)", "普通指令应答超时；连续 3 次超时判定测试板断开", &cfg.comm.cmdTimeoutMs, 20, 10000);
 			c |= ConfigRowInt("握手超时(ms)", "REQ_CONN_CHECK_DUT 应答超时（测试板 PING 最长 300ms）", &cfg.comm.connCheckTimeoutMs, 350, 10000);
+			c |= ConfigRowInt("心跳间隔(ms)", "发送心跳包的间隔", &cfg.comm.heartbeatTimeoutMs, 500, 10000);
 			c |= ConfigRowInt("轮询间隔(ms)", "业务执行中查询 GET_TEST_STATUS 的间隔", &cfg.comm.pollIntervalMs, 10, 5000);
 			c |= ConfigRowInt("UART波特率", "下次连接端口时生效", &cfg.comm.baudRate, 1200, 4000000);
 			c |= ConfigRowHex16("USB VID", "测试板 USB 厂商 ID（十六进制），修改后自动刷新端口列表", &cfg.comm.usbVid);

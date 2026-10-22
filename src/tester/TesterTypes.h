@@ -9,6 +9,7 @@ namespace Lx::Tester {
 
 constexpr int kMaxStations  = 6;
 constexpr int kTestItemCount = 3;
+constexpr int kTestModeCount = 4;
 constexpr int kMaxRetry      = 5;
 
 // 全局主状态：准备中 -> 准备就绪 -> 测试进行中 -> 测试结束 -> 准备中
@@ -32,7 +33,87 @@ enum class ItemState : uint8_t { Pending, Running, Pass, Fail, Abort, Skipped };
 // 工位一轮综合结果
 enum class Verdict : uint8_t { None, Pass, Fail, Abort };
 
+// 测试模式
+enum class TestMode : uint8_t { ModeA = 0, ModeB = 1, ModeC = 2, ModeD = 3 };
+
 enum class TestItem : uint8_t { RfPacket = 0, FreqOffset = 1, Power = 2 };
+
+inline constexpr bool IsRfTestItem(TestItem item) noexcept
+{
+	return (item == TestItem::RfPacket) || (item == TestItem::FreqOffset);
+}
+
+// 位掩码：每个bit代表一个测试项是否启用
+enum class TestItemMask : uint8_t {
+	None       = 0,
+	RfPacket   = 1 << static_cast<uint8_t>(TestItem::RfPacket),
+	FreqOffset = 1 << static_cast<uint8_t>(TestItem::FreqOffset),
+	Power      = 1 << static_cast<uint8_t>(TestItem::Power),
+	All        = RfPacket | FreqOffset | Power,
+};
+
+inline constexpr TestItemMask operator|(TestItemMask a, TestItemMask b) noexcept
+{
+	return static_cast<TestItemMask>(static_cast<uint8_t>(a) | static_cast<uint8_t>(b));
+}
+
+inline constexpr bool HasItem(TestItemMask mask, TestItem item) noexcept
+{
+	return (static_cast<uint8_t>(mask) & (1U << static_cast<uint8_t>(item))) != 0;
+}
+
+inline constexpr bool GetFirstSetTestItem(TestItemMask mask, TestItem& outItem) noexcept
+{
+	const uint8_t raw = static_cast<uint8_t>(mask);
+	for (uint8_t i = 0; i < kTestItemCount; ++i) {
+		if (raw & (1 << i)) {
+			outItem = static_cast<TestItem>(i);
+			return true;
+		}
+	}
+	return false;
+}
+
+inline constexpr bool IsFirstItemRfRelated(TestItemMask mask) noexcept
+{
+	TestItem item{};
+	if (!GetFirstSetTestItem(mask, item))
+		return false;
+	return IsRfTestItem(item);
+}
+
+inline constexpr bool IsLastSetTestItem(TestItemMask mask, TestItem currentItem) noexcept
+{
+	const uint8_t raw = static_cast<uint8_t>(mask);
+	for (int i = kTestItemCount - 1; i >= 0; --i)
+	{
+		if (raw & (1U << i))
+		{
+			return static_cast<TestItem>(i) == currentItem;
+		}
+	}
+	return false; // mask无任何bit置位
+}
+
+inline constexpr bool GetNextSetTestItem(TestItemMask mask, int currentIdx, TestItem& outNextItem) noexcept
+{
+	const uint8_t raw = static_cast<uint8_t>(mask);
+	for (int i = currentIdx + 1; i < kTestItemCount; ++i)
+	{
+		if (raw & (1U << i))
+		{
+			outNextItem = static_cast<TestItem>(i);
+			return true;
+		}
+	}
+	return false;
+}
+
+struct TestModeDef {
+	TestMode        mode;
+	const char*     name;
+	TestItemMask    enableMask;
+};
 
 // 每个测试类别都由「公共部分」+「专用部分」组成
 struct ItemCommonConfig {
@@ -60,7 +141,9 @@ struct PowerConfig {
 
 // 通信参数（所有工位共用）
 struct CommConfig {
+	TestMode testMode      = TestMode::ModeA;	// 测试模式选择
 	int cmdTimeoutMs       = 200;     // 普通指令应答超时
+	int heartbeatTimeoutMs = 500;     // 普通指令应答超时
 	int connCheckTimeoutMs = 600;     // REQ_CONN_CHECK_DUT 应答超时
 	int pollIntervalMs     = 100;     // 业务状态轮询间隔
 	int baudRate           = 115200;  // UART 波特率

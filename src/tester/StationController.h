@@ -4,6 +4,7 @@
 #include <memory>
 #include <string>
 #include "TesterModel.h"
+#include "TesterSpec.h"
 #include "link/BoardLink.h"
 #include "protocol/BoardProtocol.h"
 
@@ -99,7 +100,7 @@ private:
 	// ---- 写入产测标志
 	void setFtFlag(const ItemResult& r);
 	void setFtFlagStep(const std::string& step, int attempt);
-	void startFtFlag();
+	void startFtFlag(bool reset);
 	void ftReset(int attempt);
 	void ftConnCheck();
 	void ftSet(int attempt);
@@ -126,6 +127,8 @@ private:
 	Link::IEventLoop::TimerId m_dutRetryTimer = 0;
 	std::string   m_port;
 
+	TestMode      m_mode = TestMode::ModeA; // 测试模式
+	TestItemMask  m_localEnableMask = TestItemMask::None;
 	bool          m_testing = false;
 	bool          m_finished = false;       // 本轮已结束，等待“下一轮”
 	uint32_t      m_testGen = 0;            // 每轮开始/紧急停止/断开 +1

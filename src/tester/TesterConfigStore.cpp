@@ -78,6 +78,7 @@ json toJson(const PersistentConfig& cfg)
 		{ "comm", {
 			{ "cmdTimeoutMs", t.comm.cmdTimeoutMs },
 			{ "connCheckTimeoutMs", t.comm.connCheckTimeoutMs },
+			{ "heartbeatTimeoutMs", t.comm.heartbeatTimeoutMs },
 			{ "pollIntervalMs", t.comm.pollIntervalMs },
 			{ "baudRate", t.comm.baudRate },
 			{ "usbVid", t.comm.usbVid },
@@ -117,6 +118,7 @@ PersistentConfig fromJson(const json& root)
 	const json& cm = child(root, "comm");
 	t.comm.cmdTimeoutMs = get<int>(cm, "cmdTimeoutMs", def.comm.cmdTimeoutMs);
 	t.comm.connCheckTimeoutMs = get<int>(cm, "connCheckTimeoutMs", def.comm.connCheckTimeoutMs);
+	t.comm.heartbeatTimeoutMs = get<int>(cm, "heartbeatTimeoutMs", def.comm.heartbeatTimeoutMs);
 	t.comm.pollIntervalMs = get<int>(cm, "pollIntervalMs", def.comm.pollIntervalMs);
 	t.comm.baudRate = get<int>(cm, "baudRate", def.comm.baudRate);
 	t.comm.usbVid = get<int>(cm, "usbVid", def.comm.usbVid);
@@ -162,6 +164,7 @@ void sanitize(TestConfig& cfg)
 	cfg.ftFlag.readDelayMs = std::clamp(cfg.ftFlag.readDelayMs, 0, 60000);
 	cfg.comm.cmdTimeoutMs = std::clamp(cfg.comm.cmdTimeoutMs, 20, 10000);
 	cfg.comm.connCheckTimeoutMs = std::clamp(cfg.comm.connCheckTimeoutMs, 350, 10000);
+	cfg.comm.heartbeatTimeoutMs = std::clamp(cfg.comm.heartbeatTimeoutMs, 500, 10000);
 	cfg.comm.pollIntervalMs = std::clamp(cfg.comm.pollIntervalMs, 10, 5000);
 	cfg.comm.baudRate = std::clamp(cfg.comm.baudRate, 1200, 4000000);
 	cfg.comm.usbVid = std::clamp(cfg.comm.usbVid, 0, 0xFFFF);
