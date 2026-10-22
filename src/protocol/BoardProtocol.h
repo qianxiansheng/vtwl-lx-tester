@@ -33,6 +33,8 @@ enum class OpCode : uint16_t {
 	StopCurrTask        = 0x000B,
 	AbortAllTask        = 0x000C,
 	GetVersion          = 0x000D,
+	SetFtFlag           = 0x000E,   // 写入被测板产测标志
+	GetFtFlag           = 0x000F,   // 读取被测板产测标志
 };
 
 constexpr uint16_t ackOf(OpCode op) { return static_cast<uint16_t>(op) | kAckFlag; }
@@ -87,6 +89,7 @@ struct CfoResult    { uint8_t rc = RET_OK; int16_t raw = 0; };
 struct PowerResult  { uint8_t rc = RET_OK; uint16_t avgUA = 0, maxUA = 0, minUA = 0; };
 struct StatusResult { uint8_t rc = RET_OK; BoardTaskStatus status = BoardTaskStatus::Idle; };
 struct VersionResult{ uint8_t rc = RET_OK; std::string fw, hw; };
+struct FtFlagResult { uint8_t rc = RET_OK; uint8_t flag = 0; };
 
 // 解析成功返回 true；rc == RET_OK 但数据长度不足时返回 false（视为格式错误）
 bool parse(const std::vector<uint8_t>& p, RcOnly& out);
@@ -95,6 +98,7 @@ bool parse(const std::vector<uint8_t>& p, CfoResult& out);
 bool parse(const std::vector<uint8_t>& p, PowerResult& out);
 bool parse(const std::vector<uint8_t>& p, StatusResult& out);
 bool parse(const std::vector<uint8_t>& p, VersionResult& out);
+bool parse(const std::vector<uint8_t>& p, FtFlagResult& out);
 
 // 编码（模拟测试板使用）
 std::vector<uint8_t> encode(const RcOnly& v);
@@ -103,5 +107,6 @@ std::vector<uint8_t> encode(const CfoResult& v);
 std::vector<uint8_t> encode(const PowerResult& v);
 std::vector<uint8_t> encode(const StatusResult& v);
 std::vector<uint8_t> encode(const VersionResult& v);
+std::vector<uint8_t> encode(const FtFlagResult& v);
 
 } // namespace Lx::Proto

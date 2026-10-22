@@ -293,16 +293,25 @@ void TesterService::refreshPorts()
 		std::vector<PortEntry> ports;
 		try {
 			for (const auto& p : serial::list_ports())
-				ports.push_back({ p.port, p.description });
+				ports.push_back({ PortType::Uart, p.port, p.port, p.description, true });
 		}
 		catch (const std::exception& e) {
 			log(LogLevel::Warn, std::string("枚举串口失败：") + e.what());
 		}
 		std::sort(ports.begin(), ports.end(),
 			[](const PortEntry& a, const PortEntry& b) { return a.name < b.name; });
+
+		const CommConfig comm = m_model->config().comm;
+		for (const auto& d : Link::enumerateUsbDevices(static_cast<uint16_t>(comm.usbVid), static_cast<uint16_t>(comm.usbPid)))
+			ports.push_back({ PortType::Usb, d.instanceId, d.label, d.description, d.winusb });
+
+		// 模拟测试板在两种端口类型下都可选
 		if (Link::SimSettings::get().portsEnabled) {
-			for (int i = 1; i <= kMaxStations; ++i)
-				ports.push_back({ std::string(Link::kSimPortPrefix) + std::to_string(i), "模拟测试板" });
+			for (PortType t : { PortType::Uart, PortType::Usb })
+				for (int i = 1; i <= kMaxStations; ++i) {
+					const std::string name = std::string(Link::kSimPortPrefix) + std::to_string(i);
+					ports.push_back({ t, name, name, "模拟测试板", true });
+				}
 		}
 		m_model->setAvailablePorts(std::move(ports));
 	});
@@ -433,7 +442,10 @@ void TesterService::setConfig(const TestConfig& cfg)
 	post([this, cfg] {
 		TestConfig c = cfg;
 		ConfigStore::sanitize(c);
+		const CommConfig old = m_model->config().comm;
 		m_model->setConfig(c);
+		if (old.usbVid != c.comm.usbVid || old.usbPid != c.comm.usbPid)
+			refreshPorts();   // VID/PID 变了，重新枚举 USB 设备
 	});
 }
 

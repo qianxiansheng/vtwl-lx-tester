@@ -176,6 +176,19 @@ private:
 			m_dutConnected = false;   // 复位后需要重新握手
 			reply(f, encode(RcOnly{}), 50);
 			break;
+		case OpCode::SetFtFlag:
+			if (!m_dutConnected) reply(f, encode(RcOnly{ RET_ERR_DUT_NO_RESPONSE }), 100);
+			else if (mine && s.ftFlagFault == SimSettings::FtFlagFault::SetFail) reply(f, encode(RcOnly{ RET_ERR_DUT_BUSY }), 20);
+			else {
+				m_ftFlag = 1;
+				reply(f, encode(RcOnly{}), 30);
+			}
+			break;
+		case OpCode::GetFtFlag:
+			if (!m_dutConnected) reply(f, encode(FtFlagResult{ RET_ERR_DUT_NO_RESPONSE }), 100);
+			else reply(f, encode(FtFlagResult{ RET_OK,
+				static_cast<uint8_t>(mine && s.ftFlagFault == SimSettings::FtFlagFault::ReadZero ? 0 : m_ftFlag) }), 20);
+			break;
 		case OpCode::StopCurrTask:
 		case OpCode::AbortAllTask:
 			if (m_task != Task::None) finishTask(RET_ERR_ABORTED);
@@ -280,6 +293,7 @@ private:
 	uint32_t        m_taskGen = 0;
 	BoardTaskStatus m_status = BoardTaskStatus::Idle;
 	bool            m_dutConnected = false;
+	uint8_t         m_ftFlag = 0;           // 模拟 DUT 中保存的产测标志
 	RfTxRxResult    m_txrx{ RET_ERR_NOT_SUPPORT };
 	CfoResult       m_cfo{ RET_ERR_NOT_SUPPORT };
 	PowerResult     m_power{ RET_ERR_NOT_SUPPORT };

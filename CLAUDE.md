@@ -37,10 +37,16 @@ The window starts at 1280×880 scaled by monitor DPI (capped to the work area) a
 **Link (`src/link/`, `Lx::Link`)**:
 - `ITransport`: a byte-stream transport whose callbacks run on its own IO thread. Two implementations exist:
   - `SerialTransport`, built directly on `serial::Serial`. Any read exception means the port was physically disconnected.
+  - `UsbTransport` uses the native WinUSB API: SetupAPI, cfgmgr32 and `WinUsb_*`, with the libraries pulled in by `#pragma comment`.
+    - The port name is the device **instance ID**.
+    - `enumerateUsbDevices(vid, pid)` lists present USB nodes that match the VID/PID. Composite parents (`usbccgp`) are skipped and their `MI_xx` children are listed instead.
+    - The interface path comes from the `DeviceInterfaceGUIDs` registry value, falling back to `GUID_DEVINTERFACE_USB_DEVICE`.
+    - Endpoints are auto-picked: the first IN and OUT pipe, bulk preferred over interrupt.
+    - The reader thread uses overlapped `WinUsb_ReadPipe`. `close()` keeps calling `WinUsb_AbortPipe` until the reader exits. Any read error counts as a disconnect.
   - `SimTransport`, a simulated test board plus DUT. Port names `SIM1`..`SIM6` select it. Its behaviour is controlled by the global `SimSettings`, which the 调试 → 模拟测试板 menu edits.
 - `BoardLink`: one per port, used only on the business thread. It matches replies by TID, runs a per-request timeout, sends a 500 ms `ALIVE` heartbeat, and reports the board lost after 3 consecutive timeouts or a transport close. After a loss or `close()`, pending replies are dropped and never called back.
 - `IEventLoop`: `post`, `after`, `cancel`. `TesterService` implements it.
-- USB is reserved in the UI only (`kUsbVid`/`kUsbPid` = 0).
+- USB VID/PID live in `CommConfig::usbVid`/`usbPid` (default 0000), and changing them re-enumerates the ports. New stations default to `PortType::Usb`. `PortEntry` carries `type`, a short `label` and `usable`, which is false when the device isn't bound to WinUSB.
 
 **Tester (`src/tester/`, namespace `Lx::Tester`)**: MVVM split. ImGui has no data binding, so dirty flags stand in for it.
 - `TesterTypes.h`: the domain enums and structs (global, DUT, station and test-item states, `TestConfig`, `AlertEvent`). No ImGui here.
@@ -49,7 +55,11 @@ The window starts at 1280×880 scaled by monitor DPI (capped to the work area) a
 - `StationController`: one per station, and the place where the protocol flow lives.
   - Connect: open the port → first heartbeat ack (board connected) → `GET_VERSION` → `CONN_CHECK_DUT`. If the DUT isn't ready, the handshake retries every 1 s, but only while the station is not testing and not finished.
   - Each test item: start op → poll `GET_TEST_STATUS` every poll interval until idle or error → `GET_RESULT` → judge on the host.
-  - Order: 收发包 → 频偏 while holding the RF lock, then 功耗, then `RESET_DUT` + `CONN_CHECK_DUT`.
+  - Order: 收发包 → 频偏 while holding the RF lock, then 功耗.
+  - After the items:
+    - If all three PASS, write the FT flag (`ft*` methods): `RESET_DUT` (retried) → `CONN_CHECK_DUT` → `SET_FT_FLAG` (retried) → delay → `GET_FT_FLAG`, which must read back 1. Any failure makes the round FAIL.
+    - Otherwise the flag step is `Skipped`, and the station only does `RESET_DUT` + `CONN_CHECK_DUT`.
+    - The flag result lives in `StationInfo::ftFlag` / `RoundRecord::ftFlag`, separate from `items[]`.
   - Retries: an ABORT that wasn't caused by the emergency stop is retried after `RESET_DUT` + `CONN_CHECK_DUT`. FAIL is never retried.
   - Async callbacks are guarded by `m_connGen`/`m_testGen` plus a `weak_ptr` (`guardConn`/`guardTest`). Bump the matching generation whenever you abandon a flow.
 - `TesterViewModel`: used on the UI thread only, with no locks. `sync()` runs once per frame at the start of `main_gui`. It consumes the dirty flags and re-snapshots only the parts that changed (formatted strings, an alert deque). It also exposes `canXxx()` enable rules and forwards commands to the service.

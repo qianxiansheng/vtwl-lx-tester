@@ -26,32 +26,28 @@
       "maxPowerUA": 100.0
     }
   },
+  "ftFlag": {
+    "cmdRetryCount": 3,
+    "readDelayMs": 500
+  },
   "comm": {
     "cmdTimeoutMs": 200,
     "connCheckTimeoutMs": 600,
     "pollIntervalMs": 100,
-    "baudRate": 115200
+    "baudRate": 115200,
+    "usbVid": 0,
+    "usbPid": 0
   },
   "stations": [
     {
       "no": 1,
-      "portType": "uart",
+      "portType": "usb",
       "port": "SIM1"
     },
     {
       "no": 2,
-      "portType": "uart",
+      "portType": "usb",
       "port": "SIM2"
-    },
-    {
-      "no": 3,
-      "portType": "uart",
-      "port": "SIM3"
-    },
-    {
-      "no": 4,
-      "portType": "uart",
-      "port": "SIM4"
     }
   ]
 }

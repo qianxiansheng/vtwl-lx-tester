@@ -21,6 +21,13 @@ struct SimSettings {
 	bool    noResponse = false;     // 测试板不再应答任何指令（模拟断线）
 	bool    hangTask = false;       // 业务启动后永不结束（触发上位机业务总超时）
 
+	enum class FtFlagFault : uint8_t {
+		None,        // 正常写入、读回 1
+		SetFail,     // SET_FT_FLAG 返回 RET_ERR_DUT_BUSY
+		ReadZero,    // GET_FT_FLAG 读回 0
+	};
+	FtFlagFault ftFlagFault = FtFlagFault::None;
+
 	bool appliesTo(int simIndex) const { return target == 0 || target == simIndex; }
 
 	static SimSettings get();

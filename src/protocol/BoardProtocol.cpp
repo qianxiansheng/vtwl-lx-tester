@@ -21,6 +21,8 @@ const char* opCodeName(uint16_t op)
 	case OpCode::StopCurrTask:        return "STOP_CURR_TASK";
 	case OpCode::AbortAllTask:        return "ABORT_ALL_TASK";
 	case OpCode::GetVersion:          return "GET_VERSION";
+	case OpCode::SetFtFlag:           return "SET_FT_FLAG";
+	case OpCode::GetFtFlag:           return "GET_FT_FLAG";
 	}
 	return "UNKNOWN";
 }
@@ -221,6 +223,11 @@ bool parse(const std::vector<uint8_t>& p, VersionResult& out)
 	});
 }
 
+bool parse(const std::vector<uint8_t>& p, FtFlagResult& out)
+{
+	return parseWithRc(p, out, [](Reader& r, FtFlagResult& o) { o.flag = r.u8(); });
+}
+
 std::vector<uint8_t> encode(const RcOnly& v)
 {
 	return { v.rc };
@@ -275,6 +282,14 @@ std::vector<uint8_t> encode(const VersionResult& v)
 		w.cstr(v.fw, kVersionStrLen);
 		w.cstr(v.hw, kVersionStrLen);
 	}
+	return w.p;
+}
+
+std::vector<uint8_t> encode(const FtFlagResult& v)
+{
+	Writer w;
+	w.u8(v.rc);
+	if (v.rc == RET_OK) w.u8(v.flag);
 	return w.p;
 }
 

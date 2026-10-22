@@ -22,15 +22,12 @@ enum class DutState : uint8_t { Disconnected, Connecting, Ready, Error };
 
 enum class PortType : uint8_t { Uart = 0, Usb = 1 };
 
-// USB 端口预留（第一版未实现）
-constexpr uint16_t kUsbVid = 0x0000;
-constexpr uint16_t kUsbPid = 0x0000;
-
 // 工位本地业务状态
 enum class StationState : uint8_t { Preparing, Ready, Testing, Finished };
 
 // 单个测试项状态
-enum class ItemState : uint8_t { Pending, Running, Pass, Fail, Abort };
+// Skipped：本轮未执行（如测试项未全部 PASS 时不写产测标志）
+enum class ItemState : uint8_t { Pending, Running, Pass, Fail, Abort, Skipped };
 
 // 工位一轮综合结果
 enum class Verdict : uint8_t { None, Pass, Fail, Abort };
@@ -67,6 +64,15 @@ struct CommConfig {
 	int connCheckTimeoutMs = 600;     // REQ_CONN_CHECK_DUT 应答超时
 	int pollIntervalMs     = 100;     // 业务状态轮询间隔
 	int baudRate           = 115200;  // UART 波特率
+	int usbVid             = 0x0000;  // USB 测试板 VID（枚举 WinUSB 设备用）
+	int usbPid             = 0x0000;  // USB 测试板 PID
+};
+
+// 写入产测标志（3 项测试全部 PASS 后执行）：
+// RESET_DUT（重试）→ CONN_CHECK_DUT（不重试）→ SET_FT_FLAG（重试）→ 延时 → GET_FT_FLAG 读回 == 1
+struct FtFlagConfig {
+	int cmdRetryCount = 3;     // RESET_DUT / SET_FT_FLAG 失败后的重试次数
+	int readDelayMs   = 500;   // 写入成功后延时多久读回
 };
 
 struct TestConfig {
@@ -74,6 +80,7 @@ struct TestConfig {
 	FreqOffsetConfig freqOffset;
 	PowerConfig      power;
 	CommConfig       comm;
+	FtFlagConfig     ftFlag;
 };
 
 constexpr int kMaxItemValues = 3;
@@ -90,8 +97,8 @@ struct ItemResult {
 
 struct StationInfo {
 	int         no = 0;               // 工位编号 1~6
-	PortType    portType = PortType::Uart;
-	std::string port;                 // 选中的端口名，空 = 未选择
+	PortType    portType = PortType::Usb;   // 优先 USB
+	std::string port;                 // 端口名：UART 为 COMx；USB 为设备实例 ID；模拟板为 SIMn
 	BoardState   board = BoardState::Disconnected;
 	DutState     dut   = DutState::Disconnected;
 	std::string  boardNote;           // 测试板状态说明（固件/硬件版本、断开原因）
@@ -99,12 +106,13 @@ struct StationInfo {
 	StationState state = StationState::Preparing;
 	Verdict      lastVerdict = Verdict::None;
 	std::array<ItemResult, kTestItemCount> items{};
+	ItemResult   ftFlag;              // 写入产测标志步骤（values[0] = 读回的标志值）
 };
 
 // 需要持久化的用户配置（config.json）；运行时状态不在此列
 struct StationSetting {
 	int         no = 0;
-	PortType    portType = PortType::Uart;
+	PortType    portType = PortType::Usb;
 	std::string port;
 };
 
@@ -125,8 +133,11 @@ struct PersistentConfig {
 };
 
 struct PortEntry {
-	std::string name;                 // COMx / WinUSB 设备路径
+	PortType    type = PortType::Uart;
+	std::string name;                 // COMx / USB 设备实例 ID / SIMn
+	std::string label;                // 简短显示名（USB 为序列号或实例 ID 最后一段）
 	std::string description;
+	bool        usable = true;        // USB 未绑定 WinUSB 驱动时为 false
 };
 
 enum class LogLevel : uint8_t { Info, Warn, Error };

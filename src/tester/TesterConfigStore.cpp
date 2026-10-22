@@ -71,11 +71,17 @@ json toJson(const PersistentConfig& cfg)
 				{ "maxPowerUA", t.power.maxPowerUA },
 			} },
 		} },
+		{ "ftFlag", {
+			{ "cmdRetryCount", t.ftFlag.cmdRetryCount },
+			{ "readDelayMs", t.ftFlag.readDelayMs },
+		} },
 		{ "comm", {
 			{ "cmdTimeoutMs", t.comm.cmdTimeoutMs },
 			{ "connCheckTimeoutMs", t.comm.connCheckTimeoutMs },
 			{ "pollIntervalMs", t.comm.pollIntervalMs },
 			{ "baudRate", t.comm.baudRate },
+			{ "usbVid", t.comm.usbVid },
+			{ "usbPid", t.comm.usbPid },
 		} },
 		{ "stations", stations },
 	};
@@ -104,11 +110,17 @@ PersistentConfig fromJson(const json& root)
 	t.power.common = commonFromJson(child(pw, "common"), def.power.common);
 	t.power.maxPowerUA = get<double>(pw, "maxPowerUA", def.power.maxPowerUA);
 
+	const json& ff = child(root, "ftFlag");
+	t.ftFlag.cmdRetryCount = get<int>(ff, "cmdRetryCount", def.ftFlag.cmdRetryCount);
+	t.ftFlag.readDelayMs = get<int>(ff, "readDelayMs", def.ftFlag.readDelayMs);
+
 	const json& cm = child(root, "comm");
 	t.comm.cmdTimeoutMs = get<int>(cm, "cmdTimeoutMs", def.comm.cmdTimeoutMs);
 	t.comm.connCheckTimeoutMs = get<int>(cm, "connCheckTimeoutMs", def.comm.connCheckTimeoutMs);
 	t.comm.pollIntervalMs = get<int>(cm, "pollIntervalMs", def.comm.pollIntervalMs);
 	t.comm.baudRate = get<int>(cm, "baudRate", def.comm.baudRate);
+	t.comm.usbVid = get<int>(cm, "usbVid", def.comm.usbVid);
+	t.comm.usbPid = get<int>(cm, "usbPid", def.comm.usbPid);
 
 	sanitize(t);
 
@@ -118,7 +130,7 @@ PersistentConfig fromJson(const json& root)
 			if (!s.is_object()) continue;
 			StationSetting st;
 			st.no = get<int>(s, "no", 0);
-			st.portType = get<std::string>(s, "portType", "uart") == "usb" ? PortType::Usb : PortType::Uart;
+			st.portType = get<std::string>(s, "portType", "usb") == "uart" ? PortType::Uart : PortType::Usb;
 			st.port = get<std::string>(s, "port", "");
 			if (st.no >= 1 && st.no <= kMaxStations)
 				cfg.stations.push_back(std::move(st));
@@ -146,10 +158,14 @@ void sanitize(TestConfig& cfg)
 	cfg.power.maxPowerUA = std::max(cfg.power.maxPowerUA, 0.0);
 	cfg.rfPacket.minRssiDbm = std::clamp(cfg.rfPacket.minRssiDbm, -127.0, 127.0);
 	if (!(cfg.freqOffset.cfoHzPerLsb > 0.0)) cfg.freqOffset.cfoHzPerLsb = 1.0;
+	cfg.ftFlag.cmdRetryCount = std::clamp(cfg.ftFlag.cmdRetryCount, 0, 10);
+	cfg.ftFlag.readDelayMs = std::clamp(cfg.ftFlag.readDelayMs, 0, 60000);
 	cfg.comm.cmdTimeoutMs = std::clamp(cfg.comm.cmdTimeoutMs, 20, 10000);
 	cfg.comm.connCheckTimeoutMs = std::clamp(cfg.comm.connCheckTimeoutMs, 350, 10000);
 	cfg.comm.pollIntervalMs = std::clamp(cfg.comm.pollIntervalMs, 10, 5000);
 	cfg.comm.baudRate = std::clamp(cfg.comm.baudRate, 1200, 4000000);
+	cfg.comm.usbVid = std::clamp(cfg.comm.usbVid, 0, 0xFFFF);
+	cfg.comm.usbPid = std::clamp(cfg.comm.usbPid, 0, 0xFFFF);
 }
 
 LoadResult load(const std::filesystem::path& path, PersistentConfig& out, std::string& err)

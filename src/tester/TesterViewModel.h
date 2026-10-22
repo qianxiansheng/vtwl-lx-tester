@@ -17,8 +17,9 @@ struct ItemVM {
 
 struct StationVM {
 	int          no = 0;
-	PortType     portType = PortType::Uart;
+	PortType     portType = PortType::Usb;
 	std::string  port;
+	std::string  portLabel;             // 端口简短显示名
 	BoardState   board = BoardState::Disconnected;
 	DutState     dut = DutState::Disconnected;
 	std::string  boardNote;
@@ -26,6 +27,7 @@ struct StationVM {
 	StationState state = StationState::Preparing;
 	Verdict      verdict = Verdict::None;
 	std::array<ItemVM, kTestItemCount> items{};
+	ItemVM       ftFlag;                // 写入产测标志
 };
 
 struct StatsRowVM {
@@ -68,6 +70,8 @@ public:
 
 	// 参数编辑缓冲区，View 直接绑定到输入控件，修改后调用 commitConfig()
 	TestConfig&                   configEdit() { return m_config; }
+	int                           usbVid() const { return m_config.comm.usbVid; }
+	int                           usbPid() const { return m_config.comm.usbPid; }
 
 	// 弹窗队列：一次只显示队首
 	const AlertEvent*             currentAlert() const { return m_alerts.empty() ? nullptr : &m_alerts.front(); }
@@ -102,6 +106,9 @@ public:
 
 private:
 	static ItemVM toItemVM(TestItem item, const ItemResult& r);
+	static ItemVM toFtFlagVM(const ItemResult& r);
+	void refreshPortLabels();
+	static std::string detailOf(const ItemResult& r);
 	static LogLineVM toLogLine(const LogEntry& e);
 
 	std::shared_ptr<TesterModel>    m_model;

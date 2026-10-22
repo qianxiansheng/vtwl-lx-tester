@@ -23,6 +23,7 @@ const char* const kBoardLabel   = "测试板：";
 const char* const kDutLabel     = "DUT：";
 const char* const kStateLabel   = "工位状态：";
 const char* const kVerdictLabel = "本轮结果：";
+const char* const kFtFlagLabel  = "产测标志：";
 
 const char* const kPortTypeNames[] = { "UART", "USB" };
 
@@ -72,6 +73,7 @@ Chip ChipOf(ItemState s)
 	case ItemState::Pass:    return { "PASS",   kGreen };
 	case ItemState::Fail:    return { "FAIL",   kRed };
 	case ItemState::Abort:   return { "ABORT",  kOrange };
+	case ItemState::Skipped: return { "跳过",   kGray };
 	}
 	return { "?", kGray };
 }
@@ -168,6 +170,25 @@ bool ConfigRowInt(const char* label, const char* tip, int* v, int lo, int hi)
 	return changed;
 }
 
+// 16 位十六进制输入（USB VID/PID）
+bool ConfigRowHex16(const char* label, const char* tip, int* v)
+{
+	ImGui::TableNextRow();
+	ImGui::TableNextColumn();
+	ImGui::AlignTextToFramePadding();
+	ImGui::TextUnformatted(label);
+	if (tip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+	ImGui::TableNextColumn();
+	ImGui::SetNextItemWidth(-FLT_MIN);
+	ImGui::PushID(label);
+	uint16_t u = static_cast<uint16_t>(*v);
+	const bool changed = ImGui::InputScalar("##v", ImGuiDataType_U16, &u, nullptr, nullptr, "%04X",
+		ImGuiInputTextFlags_CharsHexadecimal);
+	ImGui::PopID();
+	if (changed) *v = u;
+	return changed;
+}
+
 bool ConfigRowDouble(const char* label, const char* tip, double* v, double step, double lo, double hi, const char* format = "%.1f")
 {
 	ImGui::TableNextRow();
@@ -249,26 +270,33 @@ void DrawStationCard(TesterViewModel& vm, const StationVM& s, float cardW, float
 	}
 	ImGui::SameLine();
 	ImGui::SetNextItemWidth(-FLT_MIN);
-	if (ImGui::BeginCombo("##port", s.port.empty() ? "选择端口" : s.port.c_str())) {
-		if (s.portType == PortType::Usb) {
-			ImGui::TextDisabled("USB 端口暂未实现（VID=%04X PID=%04X）", kUsbVid, kUsbPid);
-		}
-		else if (vm.ports().empty()) {
-			ImGui::TextDisabled("未发现端口，请点击「刷新端口」");
-		}
-		for (const auto& p : s.portType == PortType::Uart ? vm.ports() : std::vector<PortEntry>{}) {
-			char label[256];
+	const std::string preview = s.port.empty() ? std::string("选择端口") : s.portLabel;
+	if (ImGui::BeginCombo("##port", preview.c_str())) {
+		bool any = false;
+		for (const auto& p : vm.ports()) {
+			if (p.type != s.portType) continue;
+			any = true;
+			char label[384];
 			if (p.description.empty() || p.description == "n/a")
-				snprintf(label, sizeof(label), "%s", p.name.c_str());
+				snprintf(label, sizeof(label), "%s##%s", p.label.c_str(), p.name.c_str());
 			else
-				snprintf(label, sizeof(label), "%s  %s", p.name.c_str(), p.description.c_str());
+				snprintf(label, sizeof(label), "%s  %s##%s", p.label.c_str(), p.description.c_str(), p.name.c_str());
 			const bool selected = (p.name == s.port);
-			if (ImGui::Selectable(label, selected) && !selected)
+			const ImGuiSelectableFlags flags = p.usable ? ImGuiSelectableFlags_None : ImGuiSelectableFlags_Disabled;
+			if (ImGui::Selectable(label, selected, flags) && !selected)
 				vm.selectPort(s.no, p.name);
+			if (p.name != p.label && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", p.name.c_str());
 			if (selected) ImGui::SetItemDefaultFocus();
+		}
+		if (!any) {
+			if (s.portType == PortType::Usb)
+				ImGui::TextDisabled("未发现 VID=%04X PID=%04X 的 USB 设备，请检查连接后点击「刷新端口」", vm.usbVid(), vm.usbPid());
+			else
+				ImGui::TextDisabled("未发现端口，请点击「刷新端口」");
 		}
 		ImGui::EndCombo();
 	}
+	if (!s.port.empty() && s.port != s.portLabel && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", s.port.c_str());
 	ImGui::EndDisabled();
 
 	// 操作按钮
@@ -286,7 +314,7 @@ void DrawStationCard(TesterViewModel& vm, const StationVM& s, float cardW, float
 
 	// 下半部分：左列标签 + 右列状态条。用同一个 X 坐标对齐所有状态条
 	float labelW = 0;
-	for (const char* l : { kBoardLabel, kDutLabel, kStateLabel, kVerdictLabel })
+	for (const char* l : { kBoardLabel, kDutLabel, kStateLabel, kVerdictLabel, kFtFlagLabel })
 		labelW = std::max(labelW, ImGui::CalcTextSize(l).x);
 	for (const char* l : kItemLabels)
 		labelW = std::max(labelW, ImGui::CalcTextSize(l).x);
@@ -327,9 +355,8 @@ void DrawStationCard(TesterViewModel& vm, const StationVM& s, float cardW, float
 
 	ImGui::Separator();
 
-	// 测试项（悬停显示完整测量值）
-	for (int i = 0; i < kTestItemCount; ++i) {
-		const ItemVM& it = s.items[i];
+	// 测试项 + 产测标志（悬停显示完整说明）
+	auto itemRow = [&](const char* label, const ItemVM& it) {
 		const Chip c = ChipOf(it.state);
 		char text[96];
 		if (it.valueText.empty())
@@ -339,11 +366,14 @@ void DrawStationCard(TesterViewModel& vm, const StationVM& s, float cardW, float
 		else
 			snprintf(text, sizeof(text), "%s  %s", c.text, it.valueText.c_str());
 
-		rowLabel(kItemLabels[i]);
+		rowLabel(label);
 		rowChip(text, c.color);
 		if (!it.detailText.empty() && ImGui::IsItemHovered())
 			ImGui::SetTooltip("%s", it.detailText.c_str());
-	}
+	};
+	for (int i = 0; i < kTestItemCount; ++i)
+		itemRow(kItemLabels[i], s.items[i]);
+	itemRow(kFtFlagLabel, s.ftFlag);
 
 	ImGui::EndChild();
 	ImGui::PopID();
@@ -353,9 +383,9 @@ void DrawStationCard(TesterViewModel& vm, const StationVM& s, float cardW, float
 
 float StationCardHeight()
 {
-	// 标题行 + 端口行 + 2 行按钮 + 4 行状态 + 分隔线 + 3 行测试项
+	// 标题行 + 端口行 + 2 行按钮 + 4 行状态 + 分隔线 + 3 行测试项 + 产测标志
 	const ImGuiStyle& st = ImGui::GetStyle();
-	return ImGui::GetFrameHeight() * 1.25f + ImGui::GetFrameHeightWithSpacing() * 10
+	return ImGui::GetFrameHeight() * 1.25f + ImGui::GetFrameHeightWithSpacing() * 11
 		+ st.ItemSpacing.y * 3 + st.WindowPadding.y * 2;
 }
 
@@ -498,12 +528,23 @@ void DrawConfig(TesterViewModel& vm, bool* p_open)
 		if (cols == 1) ImGui::Spacing();
 
 		ImGui::TableNextColumn();
+		changed |= ConfigGroup("产测标志", "3 项全部 PASS 后写入，读回 1 为成功，否则本轮 FAIL", nullptr, [&] {
+			bool c = false;
+			c |= ConfigRowInt("指令重试次数", "复位 DUT、写入标志失败后的重试次数（握手、读回不重试）", &cfg.ftFlag.cmdRetryCount, 0, 10);
+			c |= ConfigRowInt("读回延时(ms)", "写入成功后延时多久发送 GET_FT_FLAG", &cfg.ftFlag.readDelayMs, 0, 60000);
+			return c;
+		});
+		if (cols == 1) ImGui::Spacing();
+
+		ImGui::TableNextColumn();
 		changed |= ConfigGroup("通信参数", nullptr, nullptr, [&] {
 			bool c = false;
 			c |= ConfigRowInt("指令超时(ms)", "普通指令应答超时；连续 3 次超时判定测试板断开", &cfg.comm.cmdTimeoutMs, 20, 10000);
 			c |= ConfigRowInt("握手超时(ms)", "REQ_CONN_CHECK_DUT 应答超时（测试板 PING 最长 300ms）", &cfg.comm.connCheckTimeoutMs, 350, 10000);
 			c |= ConfigRowInt("轮询间隔(ms)", "业务执行中查询 GET_TEST_STATUS 的间隔", &cfg.comm.pollIntervalMs, 10, 5000);
 			c |= ConfigRowInt("UART波特率", "下次连接端口时生效", &cfg.comm.baudRate, 1200, 4000000);
+			c |= ConfigRowHex16("USB VID", "测试板 USB 厂商 ID（十六进制），修改后自动刷新端口列表", &cfg.comm.usbVid);
+			c |= ConfigRowHex16("USB PID", "测试板 USB 产品 ID（十六进制），修改后自动刷新端口列表", &cfg.comm.usbPid);
 			return c;
 		});
 

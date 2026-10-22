@@ -23,6 +23,7 @@ const char* stateText(ItemState s)
 	case ItemState::Pass:  return "PASS";
 	case ItemState::Fail:  return "FAIL";
 	case ItemState::Abort: return "ABORT";
+	case ItemState::Skipped: return "SKIP";
 	default:               return "";
 	}
 }
@@ -69,16 +70,34 @@ const char* const kHeader =
 	"收发包_总发包,收发包_测试板收包数,收发包_被测板收包数,收发包_RSSI(dBm),收发包_收包率(%),收发包_发包率(%),收发包_result_code,收发包_判定,收发包_说明,"
 	"频偏_CFO原始值,频偏_KHz,频偏_result_code,频偏_判定,频偏_说明,"
 	"功耗_平均(uA),功耗_最大(uA),功耗_最小(uA),功耗_result_code,功耗_判定,功耗_说明,"
+	"产测标志_读回值,产测标志_result_code,产测标志_判定,产测标志_说明,"
 	"综合结果";
+
+// 读文件第一行（去掉 BOM）
+std::string firstLine(const std::filesystem::path& p)
+{
+	std::ifstream in(p, std::ios::binary);
+	std::string line;
+	std::getline(in, line);
+	if (!line.empty() && line.back() == '\r') line.pop_back();
+	if (line.rfind("\xEF\xBB\xBF", 0) == 0) line.erase(0, 3);
+	return line;
+}
 
 } // namespace
 
+// 当天文件已存在但表头不同（程序升级后字段变化）时，改写到 results_YYYYMMDD_2.csv、_3 ...，避免列错位
 std::filesystem::path ResultCsv::pathFor(long long timeMs) const
 {
 	const std::tm tm = localTm(timeMs);
-	char name[32];
-	std::strftime(name, sizeof(name), "results_%Y%m%d.csv", &tm);
-	return m_dir / name;
+	char date[16];
+	std::strftime(date, sizeof(date), "%Y%m%d", &tm);
+	std::error_code ec;
+	for (int i = 1; ; ++i) {
+		const std::string name = "results_" + std::string(date) + (i == 1 ? "" : "_" + std::to_string(i)) + ".csv";
+		const auto p = m_dir / name;
+		if (!std::filesystem::exists(p, ec) || firstLine(p) == kHeader) return p;
+	}
 }
 
 std::string ResultCsv::currentFile() const
@@ -133,6 +152,10 @@ bool ResultCsv::append(const RoundRecord& rec, std::string& err)
 	else
 		row << ",,,";
 	row << rcField(pw) << ',' << stateText(pw.state) << ',' << esc(pw.note) << ',';
+
+	const ItemResult& ff = rec.ftFlag;
+	if (ff.valueCount > 0) row << static_cast<int>(ff.values[0]);
+	row << ',' << rcField(ff) << ',' << stateText(ff.state) << ',' << esc(ff.note) << ',';
 
 	row << verdictText(rec.verdict) << "\r\n";
 	out << row.str();

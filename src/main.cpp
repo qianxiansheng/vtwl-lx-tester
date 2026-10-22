@@ -149,6 +149,17 @@ static void ShowSimBoardMenu()
 		ImGui::EndMenu();
 	}
 
+	if (ImGui::BeginMenu("产测标志")) {
+		static const char* const kFt[] = { "正常（写入并读回 1）", "写入失败（RET_ERR_DUT_BUSY）", "读回为 0" };
+		for (int i = 0; i < 3; ++i) {
+			if (ImGui::MenuItem(kFt[i], NULL, static_cast<int>(s.ftFlagFault) == i)) {
+				s.ftFlagFault = static_cast<SimSettings::FtFlagFault>(i);
+				changed = true;
+			}
+		}
+		ImGui::EndMenu();
+	}
+
 	changed |= ImGui::MenuItem("DUT 不在位（握手无应答）", NULL, &s.dutAbsent);
 	changed |= ImGui::MenuItem("业务永不结束（触发业务超时）", NULL, &s.hangTask);
 	changed |= ImGui::MenuItem("测试板停止应答（模拟断线）", NULL, &s.noResponse);
@@ -245,6 +256,8 @@ static void ShowRootWindow(bool* p_open)
 		ImGui::ShowDemoWindow(&opt_showdemowindow);
 	}
 }
+
+
 
 
 int main_gui()

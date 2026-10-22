@@ -19,6 +19,7 @@ struct RoundRecord {
 	bool        emergencyStopped = false;
 
 	std::array<ItemResult, kTestItemCount> items{};
+	ItemResult           ftFlag;       // 写入产测标志步骤（values[0] = 读回的标志值）
 	bool                 hasTxRx = false, hasCfo = false, hasPower = false;   // 是否拿到原始数据
 	Proto::RfTxRxResult  txrx;
 	Proto::CfoResult     cfo;
@@ -51,6 +52,8 @@ public:
 // 测试：每项 = 启动指令 → 轮询 GET_TEST_STATUS 直到空闲/异常 → GET_RESULT → 判定
 //       顺序 收发包 → 频偏（持有 RF 锁）→ 功耗；结束后 RESET_DUT + CONN_CHECK_DUT。
 //       ABORT（非紧急停止）按配置重试，重试前 RESET_DUT + CONN_CHECK_DUT；FAIL 不重试。
+// 产测标志：3 项全部 PASS 后 RESET_DUT（重试）→ CONN_CHECK_DUT → SET_FT_FLAG（重试）→ 延时 → GET_FT_FLAG == 1，
+//       任一步失败本轮判 FAIL；未全部 PASS 时跳过，只做 RESET_DUT + CONN_CHECK_DUT。
 class StationController : public std::enable_shared_from_this<StationController> {
 public:
 	StationController(IStationHost& host, int no);
@@ -92,6 +95,17 @@ private:
 	void finishRound();
 	void setItem(int idx, const ItemResult& r);
 	void abortRemaining(int fromIdx, const std::string& reason);
+
+	// ---- 写入产测标志
+	void setFtFlag(const ItemResult& r);
+	void setFtFlagStep(const std::string& step, int attempt);
+	void startFtFlag();
+	void ftReset(int attempt);
+	void ftConnCheck();
+	void ftSet(int attempt);
+	void ftRead();
+	void ftDone(bool ok, const std::string& note, int rc = -1, int flag = -1);
+	void abortFtFlag(const std::string& reason);
 
 	// 请求封装：链路不存在时直接忽略；回调受 generation 保护
 	void request(Proto::OpCode op, uint32_t timeoutMs, Reply onReply);

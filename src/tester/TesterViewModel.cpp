@@ -35,12 +35,16 @@ void TesterViewModel::sync()
 			vm.verdict = s.lastVerdict;
 			for (int i = 0; i < kTestItemCount; ++i)
 				vm.items[i] = toItemVM(static_cast<TestItem>(i), s.items[i]);
+			vm.ftFlag = toFtFlagVM(s.ftFlag);
 			m_stations.push_back(std::move(vm));
 		}
 	}
 
 	if (flags & TesterModel::Dirty_Ports)
 		m_ports = m_model->availablePorts();
+
+	if (flags & (TesterModel::Dirty_Ports | TesterModel::Dirty_Stations))
+		refreshPortLabels();
 
 	if (flags & TesterModel::Dirty_Stats) {
 		const StatsSnapshot snap = m_model->stats();
@@ -88,6 +92,22 @@ void TesterViewModel::sync()
 	if (flags & TesterModel::Dirty_Alert) {
 		for (auto& a : m_model->takeAlerts())
 			m_alerts.push_back(std::move(a));
+	}
+}
+
+// 端口显示名：优先用端口列表里的简短名；不在列表中（如设备未插入）时 USB 取实例 ID 最后一段
+void TesterViewModel::refreshPortLabels()
+{
+	for (auto& s : m_stations) {
+		auto it = std::find_if(m_ports.begin(), m_ports.end(),
+			[&](const PortEntry& p) { return p.type == s.portType && p.name == s.port; });
+		if (it != m_ports.end()) {
+			s.portLabel = it->label;
+		}
+		else {
+			const auto pos = s.port.find_last_of('\\');
+			s.portLabel = pos == std::string::npos ? s.port : s.port.substr(pos + 1);
+		}
 	}
 }
 
@@ -189,12 +209,9 @@ void TesterViewModel::closeAlert(bool accepted)
 
 // ---------------------------------------------------------------- 格式化
 
-ItemVM TesterViewModel::toItemVM(TestItem item, const ItemResult& r)
+// 悬停提示：说明 + result_code + 执行次数
+std::string TesterViewModel::detailOf(const ItemResult& r)
 {
-	ItemVM vm;
-	vm.state = r.state;
-
-	// 悬停提示：说明 + result_code + 执行次数
 	std::string detail = r.note;
 	if (r.resultCode > 0) {
 		char buf[32];
@@ -203,7 +220,24 @@ ItemVM TesterViewModel::toItemVM(TestItem item, const ItemResult& r)
 	}
 	if (r.attempts > 1)
 		detail += (detail.empty() ? "" : "\n") + std::string("执行次数：") + std::to_string(r.attempts);
-	vm.detailText = detail;
+	return detail;
+}
+
+ItemVM TesterViewModel::toFtFlagVM(const ItemResult& r)
+{
+	ItemVM vm;
+	vm.state = r.state;
+	vm.detailText = detailOf(r);
+	if (r.state == ItemState::Running) vm.valueText = r.note;
+	else if (r.state == ItemState::Pass) vm.valueText = "已写入";
+	return vm;
+}
+
+ItemVM TesterViewModel::toItemVM(TestItem item, const ItemResult& r)
+{
+	ItemVM vm;
+	vm.state = r.state;
+	vm.detailText = detailOf(r);
 
 	if (r.valueCount <= 0 || r.state == ItemState::Abort || r.state == ItemState::Running) {
 		if (r.state == ItemState::Running && !r.note.empty()) vm.valueText = r.note;

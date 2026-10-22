@@ -123,19 +123,18 @@ void StationController::connect()
 	const TestConfig cfg = m_host.config();
 	const std::string tag = "工位#" + std::to_string(m_no);
 
-	if (info.portType == PortType::Usb) {
-		m_host.notify(AlertLevel::Warning, "USB 端口暂未实现",
-			fmt("USB 端口（VID=%04X, PID=%04X）尚未实现，请使用 UART 端口。", kUsbVid, kUsbPid));
-		return;
-	}
 	if (info.port.empty()) {
 		m_host.notify(AlertLevel::Warning, "未选择端口", tag + " 请先选择端口。");
 		return;
 	}
 
-	auto transport = Link::isSimPort(info.port)
-		? Link::makeSimTransport(info.port)
-		: Link::makeSerialTransport(info.port, static_cast<uint32_t>(cfg.comm.baudRate));
+	std::unique_ptr<Link::ITransport> transport;
+	if (Link::isSimPort(info.port))
+		transport = Link::makeSimTransport(info.port);
+	else if (info.portType == PortType::Usb)
+		transport = Link::makeUsbTransport(info.port);
+	else
+		transport = Link::makeSerialTransport(info.port, static_cast<uint32_t>(cfg.comm.baudRate));
 
 	BoardLink::Timings t;
 	t.timeoutMs = static_cast<uint32_t>(cfg.comm.cmdTimeoutMs);
@@ -224,6 +223,7 @@ void StationController::onLinkLost(const std::string& reason)
 		++m_testGen;
 		m_host.loop().cancel(m_testTimer);
 		abortRemaining(0, "测试板断开");
+		abortFtFlag("测试板断开");
 		finishRound();
 	}
 }
@@ -333,6 +333,7 @@ void StationController::startRound()
 	m_record.boardFw = fw;
 	m_record.boardHw = hw;
 	for (int i = 0; i < kTestItemCount; ++i) setItem(i, ItemResult{});
+	setFtFlag(ItemResult{});
 	m_host.model().updateStation(m_no, [](StationInfo& st) { st.lastVerdict = Verdict::None; });
 	refreshStationState();
 
@@ -577,9 +578,23 @@ void StationController::finishTest()
 		m_host.releaseRf(m_no);
 	}
 	if (!m_link) {
+		abortFtFlag("测试板断开");
 		finishRound();
 		return;
 	}
+
+	const bool allPass = std::all_of(m_record.items.begin(), m_record.items.end(),
+		[](const ItemResult& r) { return r.state == ItemState::Pass; });
+	if (allPass) {
+		startFtFlag();   // 写标志流程本身包含复位 + 重新握手
+		return;
+	}
+
+	ItemResult skipped;
+	skipped.state = ItemState::Skipped;
+	skipped.note = "测试项未全部 PASS，不写入产测标志";
+	setFtFlag(skipped);
+
 	// 功耗测试后 DUT 处于低功耗：复位 + 重新握手后才算进入空闲
 	m_host.log(LogLevel::Info, "工位#" + std::to_string(m_no) + " 测试项完成，复位 DUT 并重新握手");
 	request(OpCode::ResetDut, 0, guardTest([this](BoardLink::Status st, const Frame& f) {
@@ -597,6 +612,127 @@ void StationController::finishTest()
 	}));
 }
 
+// ---------------------------------------------------------------- 写入产测标志
+
+void StationController::setFtFlag(const ItemResult& r)
+{
+	m_record.ftFlag = r;
+	m_host.model().updateStation(m_no, [&](StationInfo& st) { st.ftFlag = r; });
+}
+
+void StationController::setFtFlagStep(const std::string& step, int attempt)
+{
+	ItemResult r;
+	r.state = ItemState::Running;
+	r.attempts = attempt + 1;
+	r.note = attempt == 0 ? step : step + fmt("（第 %d 次重试）", attempt);
+	setFtFlag(r);
+}
+
+void StationController::startFtFlag()
+{
+	m_host.log(LogLevel::Info, "工位#" + std::to_string(m_no) + " 测试项全部 PASS，开始写入产测标志");
+	ftReset(0);
+}
+
+// 1. 复位 DUT，失败按配置重试
+void StationController::ftReset(int attempt)
+{
+	setFtFlagStep("复位 DUT", attempt);
+	request(OpCode::ResetDut, 0, guardTest([this, attempt](BoardLink::Status st, const Frame& f) {
+		RcOnly r;
+		if (st == BoardLink::Status::Ok && parse(f.payload, r) && r.rc == RET_OK) {
+			ftConnCheck();
+			return;
+		}
+		const std::string reason = st == BoardLink::Status::Timeout ? std::string("应答超时") : rcText(r.rc);
+		if (attempt < m_host.config().ftFlag.cmdRetryCount) {
+			m_host.log(LogLevel::Warn, "工位#" + std::to_string(m_no) + " 写标志前复位 DUT 失败（" + reason + "），重试");
+			ftReset(attempt + 1);
+			return;
+		}
+		ftDone(false, "复位 DUT 失败：" + reason, st == BoardLink::Status::Ok ? r.rc : -1);
+	}));
+}
+
+// 2. 握手，失败不重试
+void StationController::ftConnCheck()
+{
+	setFtFlagStep("DUT 握手", 0);
+	const uint32_t gen = m_testGen;
+	startDutCheck([this, gen](bool ok) {
+		if (gen != m_testGen) return;
+		if (ok) ftSet(0);
+		else ftDone(false, "DUT 握手失败");
+	});
+}
+
+// 3. 写入产测标志，失败按配置重试；成功后延时读回
+void StationController::ftSet(int attempt)
+{
+	setFtFlagStep("写入产测标志", attempt);
+	request(OpCode::SetFtFlag, 0, guardTest([this, attempt](BoardLink::Status st, const Frame& f) {
+		RcOnly r;
+		if (st == BoardLink::Status::Ok && parse(f.payload, r) && r.rc == RET_OK) {
+			setFtFlagStep("等待读回产测标志", 0);
+			const uint32_t delay = static_cast<uint32_t>(m_host.config().ftFlag.readDelayMs);
+			m_testTimer = m_host.loop().after(delay, guardTest([this] { ftRead(); }));
+			return;
+		}
+		const std::string reason = st == BoardLink::Status::Timeout ? std::string("应答超时") : rcText(r.rc);
+		if (attempt < m_host.config().ftFlag.cmdRetryCount) {
+			m_host.log(LogLevel::Warn, "工位#" + std::to_string(m_no) + " 写入产测标志失败（" + reason + "），重试");
+			ftSet(attempt + 1);
+			return;
+		}
+		ftDone(false, "写入产测标志失败：" + reason, st == BoardLink::Status::Ok ? r.rc : -1);
+	}));
+}
+
+// 4. 读回产测标志，== 1 才算成功
+void StationController::ftRead()
+{
+	setFtFlagStep("读取产测标志", 0);
+	request(OpCode::GetFtFlag, 0, guardTest([this](BoardLink::Status st, const Frame& f) {
+		if (st == BoardLink::Status::Timeout) { ftDone(false, "读取产测标志应答超时"); return; }
+		FtFlagResult r;
+		if (!parse(f.payload, r)) { ftDone(false, "读取产测标志应答格式错误"); return; }
+		if (r.rc != RET_OK) { ftDone(false, "读取产测标志失败：" + rcText(r.rc), r.rc); return; }
+		if (r.flag != 1) { ftDone(false, fmt("读回产测标志为 %u（期望 1）", r.flag), r.rc, r.flag); return; }
+		ftDone(true, "已写入，读回产测标志为 1", r.rc, r.flag);
+	}));
+}
+
+void StationController::ftDone(bool ok, const std::string& note, int rc, int flag)
+{
+	ItemResult r;
+	r.state = ok ? ItemState::Pass : ItemState::Fail;
+	r.attempts = m_record.ftFlag.attempts;
+	r.resultCode = rc;
+	r.note = note;
+	if (flag >= 0) {
+		r.valueCount = 1;
+		r.values = { static_cast<double>(flag), 0, 0 };
+	}
+	setFtFlag(r);
+	if (rc == RET_ERR_DUT_NO_RESPONSE) setDut(DutState::Error, note);
+	m_host.log(ok ? LogLevel::Info : LogLevel::Error,
+		"工位#" + std::to_string(m_no) + " 写入产测标志：" + (ok ? "成功，" : "失败，") + note);
+	finishRound();
+}
+
+void StationController::abortFtFlag(const std::string& reason)
+{
+	const ItemState s = m_record.ftFlag.state;
+	if (s == ItemState::Pass || s == ItemState::Fail || s == ItemState::Abort || s == ItemState::Skipped) return;
+	ItemResult r;
+	// 已开始写标志 → ABORT；还没轮到 → 跳过
+	r.state = s == ItemState::Running ? ItemState::Abort : ItemState::Skipped;
+	r.attempts = m_record.ftFlag.attempts;
+	r.note = reason;
+	setFtFlag(r);
+}
+
 void StationController::finishRound()
 {
 	m_host.loop().cancel(m_testTimer);
@@ -610,6 +746,9 @@ void StationController::finishRound()
 		anyFail |= it.state == ItemState::Fail;
 		anyAbort |= it.state == ItemState::Abort || it.state == ItemState::Pending || it.state == ItemState::Running;
 	}
+	// 写产测标志失败 = 产测整体失败；被紧急停止/断线打断 = 无有效结果
+	anyFail |= m_record.ftFlag.state == ItemState::Fail;
+	anyAbort |= m_record.ftFlag.state == ItemState::Abort;
 	const Verdict v = anyFail ? Verdict::Fail : anyAbort ? Verdict::Abort : Verdict::Pass;
 	m_record.verdict = v;
 	m_record.timeMs = systemMs();
@@ -647,6 +786,7 @@ void StationController::emergencyStop()
 
 	m_record.emergencyStopped = true;
 	abortRemaining(0, "紧急停止");
+	abortFtFlag("紧急停止");
 	finishRound();   // m_finished = false：回到准备中
 
 	// 紧急停止后 DUT 状态不确定，重新握手确认是否就绪
@@ -659,6 +799,7 @@ void StationController::prepareNextRound()
 	if (m_testing) return;
 	m_finished = false;
 	for (int i = 0; i < kTestItemCount; ++i) setItem(i, ItemResult{});
+	setFtFlag(ItemResult{});
 	m_host.model().updateStation(m_no, [](StationInfo& st) { st.lastVerdict = Verdict::None; });
 	refreshStationState();
 	m_host.onStationChanged(m_no);
