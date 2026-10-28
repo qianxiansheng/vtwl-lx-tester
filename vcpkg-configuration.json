@@ -1,0 +1,14 @@
+{
+  "default-registry": {
+    "kind": "builtin",
+    "baseline": "67972e92edd181d433927b42d8ab4bfa52ac164a"
+  },
+  "registries": [
+    {
+      "kind": "git",
+      "repository": "https://github.com/qianxiansheng/vcpkg-registry-A.git",
+      "baseline": "c92ca7c429205422080069ad6a52399dfeebaffc",
+      "packages": [ "serial" ]
+    }
+  ]
+}
