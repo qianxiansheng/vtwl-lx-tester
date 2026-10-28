@@ -10,16 +10,18 @@ The codebase started as a copy of a sibling project (`../LxRecorder`, a voice-re
 
 ## Build
 
-There is no CMake or `.sln` in the repo. Build the MSBuild project `lxTester.vcxproj` (toolset v145, Visual Studio). Note that `.gitignore` excludes `*.vcxproj*` and `*.sln`, so the project file exists only locally:
+The build is CMake + vcpkg in manifest mode (`CMakeLists.txt`, `CMakePresets.json`, `vcpkg.json`). `VCPKG_ROOT` must point at a vcpkg checkout (`C:\develop\vcpkg` on the dev machine):
 
 ```
-msbuild lxTester.vcxproj /p:Configuration=Debug /p:Platform=x64
+cmake --preset x64                  # or x86; uses the Visual Studio 18 2026 generator
+cmake --build --preset x64-debug    # x64-release, x86-debug, x86-release
 ```
 
-- Output goes to `$(SolutionDir)..\bin\<Platform>\<Config>\` and intermediates to `..\tmp\...`. When you build the vcxproj directly, that means `../bin` and `../tmp`, outside the repo.
-- Prebuilt libs are checked in locally under `thirdparty/glfw/lib/<Platform>` and `thirdparty/wjwwood/lib/<Config>/<Platform>` (`*.lib` is gitignored).
-- Include dirs: `src`, `src/imgui`, `src/imgui/backends`, `src/imgui/extensions`, `thirdparty/glfw/include`, `thirdparty/wjwwood/include`, `thirdparty/nlohmann/include` (nlohmann/json v3.11.3, a single header).
-- **Which files get compiled is controlled by the vcxproj, not by what's in `src/`.** Right now it compiles `main.cpp`, `ui_main.cpp`, `protocol/*.cpp`, `link/*.cpp`, `tester/*.cpp`, `utils/*`, and the imgui sources. `Domain.cpp`, `Model.cpp`, and `main_lxrecorder.cpp` are **not** in the project. If you add new .cpp files, add them to `lxTester.vcxproj` (and `.filters`).
+- Output goes to `out/build/<preset>/<Config>/`. vcpkg copies `glfw3.dll` and `serial.dll` next to the exe. The VS debugger's working directory is the repo root, so `config.json`, `imgui.ini` and `results/` live there.
+- Dependencies come from vcpkg: `glfw3`, `nlohmann-json` (3.12.x, header-only), and `serial`. `serial` comes from the private registry `https://github.com/qianxiansheng/vcpkg-registry-A.git` (it builds upstream wjwwood/serial master with a no-catkin patch, and the target is `serial::serial`). `vcpkg-configuration.json` pins the baselines of both the builtin registry and that one. To pick up a new port version, bump the matching `baseline` there.
+- The executable is a console-subsystem app. `app.manifest` enables the segment heap.
+- Include dirs: `src`, `src/imgui`, `src/imgui/backends`, `src/imgui/extensions`, plus the vcpkg packages.
+- **Which files get compiled is controlled by the source lists in `CMakeLists.txt`, not by what's in `src/`.** Right now it compiles `main.cpp`, `ui_main.cpp`, `protocol/*.cpp`, `link/*.cpp`, `tester/*.cpp`, `utils/*`, and the imgui sources. `Domain.cpp`, `Model.cpp`, and `main_lxrecorder.cpp` are **not** in the build. If you add new .cpp files, add them to `lxTester_SRCS`.
 - The project compiles with `/utf-8`. All sources are UTF-8 without a BOM.
 - `main.cpp` and `main_lxrecorder.cpp` both define `main_init`/`main_gui`, so only one of them can be compiled at a time.
 - There are no tests and no lint setup. To check the protocol codec without the GUI, compile a throwaway `main` together with `src/protocol/BoardProtocol.cpp` using `cl /std:c++20 /utf-8`. That file has no dependencies. Use the simulated test boards for everything else (see below).
@@ -75,7 +77,7 @@ The window starts at 1280×880 scaled by monitor DPI (capped to the work area) a
 
 **Utilities**: `utils/thread_pool.h`, `utils/concurrentqueue` (moodycamel), and `utils/INIReader` + `ini.c` (inih). `utils/utils.h` provides string/encoding helpers and `utils::Alert`. `BinFileWriter.h` handles async binary file writes (recorder-specific).
 
-**Vendored code**: `src/imgui/` (Dear ImGui plus extensions: ImConsole, ImFileDialog, TextEditor, imspinner, memory editor), `src/stb_image.h`, and `thirdparty/`. Don't modify these unless you have to.
+**Vendored code**: `src/imgui/` (Dear ImGui plus extensions: ImConsole, ImFileDialog, TextEditor, imspinner, memory editor), and `src/stb_image.h`. Don't modify these unless you have to.
 
 ## Conventions
 
